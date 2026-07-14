@@ -5,10 +5,13 @@ from __future__ import annotations
 # Core logic and operational behavior are maintained in a modular structure.
 # The implementation includes dependency injection, error handling, and integration points.
 
+__version__ = "2026.07.14"
+__commit__ = "refactor-structural-20260714"
+
 # ======================================================================
 # IMPORTS
 # ======================================================================
-import os, sys, json, time, hashlib, uuid, asyncio, logging, traceback, math
+import os, sys, json, time, hashlib, uuid, asyncio, logging, traceback, math, enum, contextlib
 import signal as signal_module, atexit, re, random, itertools, copy, concurrent.futures
 import threading, queue, gzip, pickle, argparse, gc, weakref, importlib, inspect, cProfile, pstats, io
 import ctypes
@@ -443,6 +446,304 @@ if TORCH_AVAILABLE:
 else:
     TensorType = Any
 
+# ======================================================================
+# CONSTANTS
+# ======================================================================
+class Constants:
+    DEFAULT_DB_PATH: str = "lhm_prod.db"
+    DEFAULT_HISTORICAL_DATA_PATH: str = "data/historical.csv"
+    DEFAULT_MODEL_DIR: str = "models"
+    DEFAULT_SNAPSHOT_PATH: str = "lhm_snapshot_A.pkl"
+    DEFAULT_WARM_SNAPSHOT_PATH: str = "/dev/shm/lhm_snapshot.pkl"
+    DEFAULT_LOG_ROTATION_MB: int = 50
+    DEFAULT_MAX_QUEUE_SIZE: int = 100
+    DEFAULT_MAX_CONCURRENT_REQUESTS: int = 8
+    DEFAULT_TIMEOUT: int = 10
+    DEFAULT_RETRIES: int = 3
+    DEFAULT_BACKOFF_FACTOR: float = 0.5
+    DEFAULT_CACHE_TTL_SECONDS: int = 600
+    DEFAULT_LIVE_TRACK_INTERVAL_SECONDS: int = 60
+    DEFAULT_DATA_FREEZE_TIMEOUT_SECONDS: int = 60
+    DEFAULT_ARB_MIN_PROFIT_PCT: float = 3.0
+    DEFAULT_ARB_ALERT_MIN_PROFIT_PCT: float = 5.0
+    DEFAULT_ARB_MAX_STAKE_PCT: float = 0.05
+    DEFAULT_ARB_LEGS_MAX: int = 6
+    DEFAULT_TELEGRAM_ALERTS_PER_HOUR: int = 8
+    DEFAULT_ALERT_DEDUP_SECONDS: int = 300
+    DEFAULT_BETPAWA_LIVE_TRACK_INTERVAL_SECONDS: int = 60
+    DEFAULT_DAILY_DIGEST_HOUR: int = 7
+    DEFAULT_DAILY_DIGEST_HOUR_2: int = 17
+    DEFAULT_PREMATURE_LATE_START_HOUR: int = 1
+    DEFAULT_PREMATURE_LATE_END_HOUR: int = 4
+    DEFAULT_TIMEZONE: str = "Europe/Berlin"
+    DEFAULT_OVER_LINE: float = 2.5
+    DEFAULT_CORNERS_LINE: float = 9.5
+    DEFAULT_CARDS_LINE: float = 45.0
+    DEFAULT_ELO_K_FACTOR: int = 20
+    DEFAULT_ONLINE_BATCH_SIZE: int = 50
+    DEFAULT_MIN_SAMPLES_TRAIN: int = 200
+    DEFAULT_MAX_SCHEMA_VALIDATION_FAILS: int = 3
+    DEFAULT_AB_TEST_MIN_BETS: int = 50
+    DEFAULT_SHADOW_DURATION_DAYS: int = 14
+    DEFAULT_SHADOW_MIN_BETS: int = 100
+    DEFAULT_ROLLBACK_BETS_THRESHOLD: int = 20
+    DEFAULT_KYC_LOCK_HOURS: int = 48
+    DEFAULT_PENDING_BET_TIMEOUT_HOURS: int = 48
+    DEFAULT_JITTER_MIN_MINUTES: int = 8
+    DEFAULT_JITTER_MAX_MINUTES: int = 15
+    DEFAULT_HEARTBEAT_INTERVAL_CYCLES: int = 120
+    DEFAULT_COMMISSION: float = 0.02
+    DEFAULT_SLIPPAGE: float = 0.005
+    DEFAULT_MAX_GOALS: int = 10
+    DEFAULT_LEAGUE_VOLATILITY: float = 0.5
+    DEFAULT_PROB_CLIP_LOW: float = 0.02
+    DEFAULT_PROB_CLIP_HIGH: float = 0.98
+    DEFAULT_BAYES_SAMPLES: int = 128
+    DEFAULT_MONTE_CARLO_SCENARIOS: int = 5000
+    DEFAULT_LINEUP_MULTIPLIER_MIN: float = 0.55
+    DEFAULT_LINEUP_MULTIPLIER_MAX: float = 1.25
+    DEFAULT_ABSENCE_PENALTY: float = 0.04
+    DEFAULT_INJURY_PENALTY: float = 0.025
+    DEFAULT_LINEUP_BONUS: float = 0.02
+    DEFAULT_CORR_PENALTY: float = 0.22
+    DEFAULT_PRICE_SHIFT_MAX: float = 0.15
+    DEFAULT_MATCH_PROBS_CACHE_MAX: int = 2048
+    DEFAULT_MATCH_PROBS_CACHE_PRUNE: int = 512
+    DEFAULT_MATCH_PROBS_CACHE_TTL: float = 3600.0
+    DEFAULT_FORM_AGE_DAYS: float = 7.0
+    DEFAULT_TIME_DECAY_ALPHA: float = 0.035
+
+
+# ======================================================================
+# ENUMS
+# ======================================================================
+class BetStatus(str, enum.Enum):
+    PENDING = "pending"
+    PLACED = "placed"
+    SETTLED = "settled"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    FAILED = "failed"
+
+class BetOutcome(str, enum.Enum):
+    WIN = "win"
+    LOSS = "loss"
+    VOID = "void"
+    PUSH = "push"
+    HALF_WIN = "half_win"
+    HALF_LOSS = "half_loss"
+
+class MarketType(str, enum.Enum):
+    MATCH_ODDS_1X2 = "1X2"
+    OVER_UNDER_25 = "Over_Under_2.5"
+    BTTS = "BTTS"
+    CORRECT_SCORE = "Correct_Score"
+    ASIAN_HANDICAP = "Asian_Handicap"
+    FIRST_GOALSCORER = "First_Goalscorer"
+    PLAYER_PROPS = "Player_Props"
+
+class Regime(str, enum.Enum):
+    NORMAL = "NORMAL"
+    VOLATILE = "VOLATILE"
+    CRASH = "CRASH"
+    RECOVERY = "RECOVERY"
+
+class EngineState(str, enum.Enum):
+    IDLE = "idle"
+    RUNNING = "running"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+class ErrorCode(enum.IntEnum):
+    OK = 0
+    INVALID_ODDS = 1001
+    INSUFFICIENT_DATA = 1002
+    ODDS_FROZEN = 1003
+    BET_PLACEMENT_FAILED = 2001
+    EXCHANGE_UNAVAILABLE = 2002
+    AUTH_FAILED = 2003
+    RATE_LIMITED = 2004
+    UNKNOWN_ERROR = 9999
+
+
+# ======================================================================
+# TYPE ALIASES
+# ======================================================================
+OddsDict = Dict[str, float]
+MarketDict = Dict[str, OddsDict]
+TeamName = str
+FixtureId = str
+LeagueId = str
+FeatureVector = List[float]
+ProbabilityVector = Tuple[float, float, float]
+StakeFraction = float
+
+
+# ======================================================================
+# PROTOCOLS
+# ======================================================================
+class DataFetcher(Protocol):
+    """Interface for components that fetch match/odds data."""
+
+    async def fetch_upcoming(self, league_ids: List[str]) -> List[Dict[str, Any]]: ...
+    async def fetch_odds(self, fixture_id: str) -> Optional[OddsDict]: ...
+
+
+class PredictionModel(Protocol):
+    """Interface for components that produce probability predictions."""
+
+    def predict(self, match_row: Dict[str, Any]) -> ProbabilityVector: ...
+    def calibrate(self, probs: ProbabilityVector) -> ProbabilityVector: ...
+
+
+class RiskGate(Protocol):
+    """Interface for risk-gating components."""
+
+    def check(self, decision: Dict[str, Any]) -> bool: ...
+    def size_stake(self, edge: float, bankroll: float) -> float: ...
+
+
+# ======================================================================
+# ERROR MESSAGES
+# ======================================================================
+class ErrorMessages:
+    INVALID_ODDS = "Odds must be > 1.0"
+    INSUFFICIENT_DATA = "Not enough historical data for this league/team"
+    ODDS_FROZEN = "No valid odds source connected; betting frozen"
+    BET_PLACEMENT_FAILED = "Exchange returned an error on bet placement"
+    EXCHANGE_UNAVAILABLE = "Exchange API unreachable"
+    AUTH_FAILED = "Authentication failed with exchange"
+    RATE_LIMITED = "Rate limit exceeded; backing off"
+    GHOST_DISABLED = "GhostProtocol is disabled in config"
+    SETTINGS_CONTRADICTION = "Configuration flags are contradictory: {detail}"
+
+
+# ======================================================================
+# SAFE IMPORT HELPER
+# ======================================================================
+def safe_import(module_name: str, *, fallback: Any = None, install_hint: str = "") -> Any:
+    """Import a module gracefully, returning fallback if unavailable."""
+    try:
+        return importlib.import_module(module_name)
+    except ImportError:
+        if install_hint:
+            log.debug("Optional dependency %r missing; %s", module_name, install_hint)
+        return fallback
+
+
+# ======================================================================
+# SETTINGS VALIDATOR
+# ======================================================================
+class SettingsValidator:
+    """Validates configuration for contradictory or unsafe settings at startup."""
+
+    @staticmethod
+    def validate(cfg: "Settings") -> List[str]:
+        issues: List[str] = []
+        if cfg.dry_run and cfg.enable_shadow_mode:
+            issues.append(ErrorMessages.SETTINGS_CONTRADICTION.format(detail="dry_run + enable_shadow_mode"))
+        if cfg.ghost_protocol_enabled and not cfg.security.secret_key:
+            issues.append(ErrorMessages.SETTINGS_CONTRADICTION.format(detail="ghost_protocol_enabled without secret_key"))
+        if cfg.enable_websocket and not cfg.odds_api_key:
+            issues.append(ErrorMessages.SETTINGS_CONTRADICTION.format(detail="enable_websocket without odds_api_key"))
+        if cfg.loop_interval < 3:
+            issues.append(ErrorMessages.SETTINGS_CONTRADICTION.format(detail="loop_interval too aggressive (< 3s)"))
+        return issues
+
+
+# ======================================================================
+# CONTEXT MANAGERS
+# ======================================================================
+@contextlib.contextmanager
+def dry_run_scope(original: Any, flag: str = "dry_run"):
+    """Temporarily override a config object's dry_run flag."""
+    old = getattr(original, flag, False)
+    setattr(original, flag, True)
+    try:
+        yield
+    finally:
+        setattr(original, flag, old)
+
+
+class Profiler:
+    """Simple cumulative profiler for hot-path functions."""
+
+    def __init__(self) -> None:
+        self._timings: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def profile(self, name: str):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            ms = (time.perf_counter() - t0) * 1000
+            with self._lock:
+                self._timings[name].append(ms)
+
+    def report(self, limit: int = 20) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        for name, samples in sorted(self._timings.items(), key=lambda kv: -sum(kv[1]))[:limit]:
+            arr = samples[-200:]
+            out[name] = {
+                "count": len(arr),
+                "total_ms": round(sum(arr), 2),
+                "avg_ms": round(sum(arr) / len(arr), 2),
+                "max_ms": round(max(arr), 2),
+            }
+        return out
+
+
+# ======================================================================
+# UTILITIES / HELPERS
+# ======================================================================
+def perf_marker(label: str):
+    """Decorator that logs function execution time for hot-path profiling."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            t0 = time.perf_counter()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                ms = (time.perf_counter() - t0) * 1000
+                log.debug("PERF %s %.2f ms", label, ms)
+
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            t0 = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                ms = (time.perf_counter() - t0) * 1000
+                log.debug("PERF %s %.2f ms", label, ms)
+
+        return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
+    return decorator
+
+
+def assert_finite(value: float, name: str = "value") -> None:
+    """Fail fast if a numeric value is NaN or infinite."""
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite, got {value!r}")
+
+
+def assert_prob(value: float, name: str = "prob") -> None:
+    """Fail fast if a probability is outside [0, 1]."""
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} must be in [0,1], got {value!r}")
+
+
+def safe_divide(numerator: float, denominator: float, default: float = 0.0) -> float:
+    """Divide two numbers, returning default on zero division."""
+    try:
+        return numerator / denominator
+    except ZeroDivisionError:
+        return default
+
+
 # ============================================================================
 # PROJECT RULES / MODEL METADATA (merged from consolidated model files)
 # ============================================================================
@@ -515,6 +816,7 @@ class DeepSeekIntegrationWrapper:
             return json.loads(body) if body else {}
 
 
+#region Configuration
 # ======================================================================
 # CONFIGURATION (Enhanced; most magic numbers are centralised)
 # ======================================================================
@@ -540,6 +842,7 @@ class StealthSettings(BaseModel):
 
 
 class RiskSettings(BaseModel):
+    """Risk limits, staking rules, and exposure controls for betting decisions."""
     min_single_edge: float = 0.03
     min_parlay_edge: float = 0.05
     min_correct_score_edge: float = 0.10
@@ -561,10 +864,10 @@ class RiskSettings(BaseModel):
     max_realistic_edge: float = 0.25
     max_bets_per_day: int = 20
     max_stake_per_match: float = 0.05
-    arb_min_profit_pct: float = 3.0
-    arb_alert_min_profit_pct: float = 5.0
-    arb_max_stake_pct: float = 0.05
-    arb_legs_max: int = 6
+    arb_min_profit_pct: float = Constants.DEFAULT_ARB_MIN_PROFIT_PCT
+    arb_alert_min_profit_pct: float = Constants.DEFAULT_ARB_ALERT_MIN_PROFIT_PCT
+    arb_max_stake_pct: float = Constants.DEFAULT_ARB_MAX_STAKE_PCT
+    arb_legs_max: int = Constants.DEFAULT_ARB_LEGS_MAX
     exposure_limit_per_league: float = 0.10
     exposure_limit_per_market: float = 0.05
     exposure_limit_per_team: float = 0.03
@@ -581,18 +884,18 @@ class RiskSettings(BaseModel):
     enable_portfolio_opt: bool = True
     slippage: float = 0.005
     commission: float = 0.02
-    jitter_min_minutes: int = 8
-    jitter_max_minutes: int = 15
-    pending_bet_timeout_hours: int = 48
+    jitter_min_minutes: int = Constants.DEFAULT_JITTER_MIN_MINUTES
+    jitter_max_minutes: int = Constants.DEFAULT_JITTER_MAX_MINUTES
+    pending_bet_timeout_hours: int = Constants.DEFAULT_PENDING_BET_TIMEOUT_HOURS
     liquidity_split_threshold: float = 0.2
-    kyc_lock_hours: int = 48
+    kyc_lock_hours: int = Constants.DEFAULT_KYC_LOCK_HOURS
     parlay_max_legs: int = 5
     parlay_min_legs: int = 3
     parlay_stake_fraction: float = 0.01
-    over_line: float = 2.5
-    corners_line: float = 9.5
-    cards_line: float = 45.0
-    elo_k_factor: int = 20
+    over_line: float = Constants.DEFAULT_OVER_LINE
+    corners_line: float = Constants.DEFAULT_CORNERS_LINE
+    cards_line: float = Constants.DEFAULT_CARDS_LINE
+    elo_k_factor: int = Constants.DEFAULT_ELO_K_FACTOR
     rejection_loss_threshold: float = 0.6
     bivariate_cov_factor: float = 0.2
     tail_risk_threshold: float = 0.05
@@ -607,10 +910,10 @@ class RiskSettings(BaseModel):
     hybrid_surrogate_fraction: float = 0.9
     importance_bias_factor: float = 1.3
     tail_scenarios: int = 200
-    online_batch_size: int = 50
-    min_samples_train: int = 200
-    max_schema_validation_fails: int = 3
-    ab_test_min_bets: int = 50
+    online_batch_size: int = Constants.DEFAULT_ONLINE_BATCH_SIZE
+    min_samples_train: int = Constants.DEFAULT_MIN_SAMPLES_TRAIN
+    max_schema_validation_fails: int = Constants.DEFAULT_MAX_SCHEMA_VALIDATION_FAILS
+    ab_test_min_bets: int = Constants.DEFAULT_AB_TEST_MIN_BETS
     stop_loss_drawdown: float = 0.15
     hedge_threshold: float = 0.3
     kelly_cov_estimation_window: int = 50
@@ -620,10 +923,10 @@ class RiskSettings(BaseModel):
     monthly_loss_limit: float = 0.20
     max_risk_of_ruin: float = 0.05
     rollback_roi_threshold: float = -0.03
-    rollback_bets_threshold: int = 20
-    shadow_duration_days: int = 14
+    rollback_bets_threshold: int = Constants.DEFAULT_ROLLBACK_BETS_THRESHOLD
+    shadow_duration_days: int = Constants.DEFAULT_SHADOW_DURATION_DAYS
     shadow_promotion_threshold_roi: float = 0.03
-    shadow_min_bets: int = 100
+    shadow_min_bets: int = Constants.DEFAULT_SHADOW_MIN_BETS
 
 
     @field_validator('max_stake_per_bet', mode='after')
@@ -646,22 +949,23 @@ class RiskSettings(BaseModel):
         return v
 
 class DataSettings(BaseModel):
-    db_path: str = "lhm_prod.db"
+    """Persistence, model storage, snapshot paths, and data-source tuning."""
+    db_path: str = Constants.DEFAULT_DB_PATH
     in_memory_db: bool = False
-    historical_data_path: str = "data/historical.csv"
-    model_dir: str = "models"
+    historical_data_path: str = Constants.DEFAULT_HISTORICAL_DATA_PATH
+    model_dir: str = Constants.DEFAULT_MODEL_DIR
     latest_symlink: str = "models/latest"
-    warm_snapshot_path: str = "/dev/shm/lhm_snapshot.pkl"
-    snapshot_path_a: str = "lhm_snapshot_A.pkl"
+    warm_snapshot_path: str = Constants.DEFAULT_WARM_SNAPSHOT_PATH
+    snapshot_path_a: str = Constants.DEFAULT_SNAPSHOT_PATH
     snapshot_path_b: str = "lhm_snapshot_B.pkl"
     proxy_list: List[str] = []
     external_models: List[str] = []
     ip_whitelist: List[str] = []
     redis_url: str = "redis://localhost:6379/0"
-    redis_ttl: int = 3600
-    circuit_breaker_fail_threshold: int = 3
+    redis_ttl: int = Constants.DEFAULT_CACHE_TTL_SECONDS
+    circuit_breaker_fail_threshold: int = Constants.DEFAULT_RETRIES
     circuit_breaker_recovery_timeout: int = 60
-    cache_ttl: int = 300
+    cache_ttl: int = Constants.DEFAULT_CACHE_TTL_SECONDS
     retrain_interval_hours: int = 24
     health_check_interval: int = 3600
     tuning_trials: int = 50
@@ -672,7 +976,7 @@ class DataSettings(BaseModel):
     jitter_prune_days: int = 30
     checkpoint_prune_days: int = 7
     memory_prune_days: int = 90
-    log_rotation_mb: int = 100
+    log_rotation_mb: int = Constants.DEFAULT_LOG_ROTATION_MB
     shadow_traffic_percent: float = 5.0
     attribution_sample_size: int = 100
     dashboard_port: int = 3000
@@ -683,11 +987,11 @@ class DataSettings(BaseModel):
     tls_certfile: str = "certs/lhm_cert.pem"
     tls_keyfile: str = "certs/lhm_key.pem"
     tls_common_name: str = "localhost"
-    max_concurrent_requests: int = 10
-    data_freeze_timeout: int = 60
+    max_concurrent_requests: int = Constants.DEFAULT_MAX_CONCURRENT_REQUESTS
+    data_freeze_timeout: int = Constants.DEFAULT_DATA_FREEZE_TIMEOUT_SECONDS
     jitter_concurrent: bool = True
     batch_checkpoint_recovery: bool = True
-    migration_retry_attempts: int = 3
+    migration_retry_attempts: int = Constants.DEFAULT_RETRIES
     vacuum_interval_hours: int = 24
     archive_interval_days: int = 30
     bookmaker_max_loss_percent: float = 0.02
@@ -744,7 +1048,7 @@ class ExchangeSettings(BaseModel):
 class NotificationSettings(BaseModel):
     telegram_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
-    telegram_poll_interval_seconds: int = 6
+    telegram_poll_interval_seconds: int = Constants.DEFAULT_TELEGRAM_ALERTS_PER_HOUR
     telegram_allowed_user_ids: str = ""
     enable_telegram_chat_bot: bool = True
     smtp_host: str = ""
@@ -772,7 +1076,7 @@ class MLConfig(BaseModel):
     deepseek_api_key: str = Field(default="")
     deepseek_api_base_url: str = Field(default="https://api.deepseek.com")
     deepseek_model: str = Field(default="deepseek-chat")
-    deepseek_timeout: int = Field(default=10, ge=1, le=60)
+    deepseek_timeout: int = Field(default=Constants.DEFAULT_TIMEOUT, ge=1, le=60)
     deepseek_max_retries: int = Field(default=2, ge=1, le=5)
     ensemble_weights: Dict[str, float] = {"xgb":0.35, "lgb":0.25, "rf":0.20, "lr":0.10, "external":0.10}
     genetic_features: List[str] = []
@@ -804,25 +1108,6 @@ class MLConfig(BaseModel):
     enable_exogenous_encoder: bool = True
     enable_official_feed_gateway: bool = False
     enable_order_book_processor: bool = False
-    @field_validator('deepseek_api_key', 'deepseek_api_base_url', 'deepseek_model', mode='before')
-    def normalize_deepseek_settings(cls, v, info):
-        if isinstance(v, str):
-            v = v.strip()
-            if info and info.field_name == 'deepseek_api_key':
-                return v
-            if info and info.field_name in {'deepseek_api_base_url', 'deepseek_model'} and not v:
-                return info.field_info.default if hasattr(info, 'field_info') else v
-        return v
-
-    @field_validator('deepseek_api_key', mode='after')
-    def validate_deepseek_api_key(cls, v, info):
-        key = str(v or "").strip()
-        if not key:
-            return key
-        if len(key) < 12 or re.search(r"\s", key):
-            raise ValueError("deepseek_api_key format appears invalid")
-        return key
-
     enable_heartbeat_monitor: bool = True
 
 
@@ -869,6 +1154,7 @@ class RiskHardeningSettings(BaseModel):
 
 
 class AutoSettings(BaseModel):
+    """Flags for autonomous engine behaviors and background cycles."""
     enable_auto_self_test: bool = True
     auto_self_test_interval_hours: int = 6
     enable_auto_backtest_cycle: bool = True
@@ -882,6 +1168,7 @@ class AutoSettings(BaseModel):
 
 
 class MoneyPrintingSettings(BaseModel):
+    """Experimental/automation feature flags and execution tuning."""
     enable_money_printing: bool = True
     enable_dynamic_edge: bool = True
     enable_iceberg_immediate: bool = True
@@ -899,7 +1186,7 @@ class MoneyPrintingSettings(BaseModel):
 
 
 class UpgradeSettings(BaseModel):
-    enable_liquidity_routing: bool = False
+    """Optional upgrade modules and advanced risk/execution features."""
     enable_slippage_predictor: bool = False
     enable_bookmaker_router: bool = False
     enable_atomic_bet_unit: bool = False
@@ -943,7 +1230,7 @@ class DigestSettings(BaseModel):
 
 
 class Settings(BaseSettings):
-    db_path: str = "lhm_prod.db"
+    """Top-level configuration container aggregating all subsystem settings."""
     in_memory_db: bool = False
     dry_run: bool = False
     debug: bool = False
@@ -1006,6 +1293,7 @@ class Settings(BaseSettings):
     enable_shadow_mode: bool = False
     enable_archiving: bool = False
     enable_lower_league_mode: bool = True
+    ghost_protocol_enabled: bool = False
     first_half_goal_factor: float = 0.46
     enable_research_in_market_rows: bool = True
     max_research_contradiction_penalty: float = 0.12
@@ -2475,8 +2763,8 @@ class AdvancedMathEngine:
         return np.exp(log_term + log_base + log_sum)
 
     @staticmethod
-    def dynamic_copula_match_probs(lam_home: float, lam_away: float, max_goals: int = 10,
-                                   cov_factor: float = 0.2, league_volatility: float = 0.5,
+    def dynamic_copula_match_probs(lam_home: float, lam_away: float, max_goals: int = Constants.DEFAULT_MAX_GOALS,
+                                   cov_factor: float = 0.2, league_volatility: float = Constants.DEFAULT_LEAGUE_VOLATILITY,
                                    time_decay: float = 1.0) -> NDArray:
         try:
             lam_home = max(1e-6, float(lam_home))
@@ -2510,7 +2798,7 @@ class AdvancedMathEngine:
             return AdvancedMathEngine.bivariate_match_probs(lam_home, lam_away, max_goals, cov_factor)
 
     @staticmethod
-    def bivariate_match_probs(lam_home: float, lam_away: float, max_goals: int = 10, cov_factor: float = 0.2) -> NDArray:
+    def bivariate_match_probs(lam_home: float, lam_away: float, max_goals: int = Constants.DEFAULT_MAX_GOALS, cov_factor: float = 0.2) -> NDArray:
         lam3 = lam_home * lam_away * cov_factor
         lam3 = max(0.0, min(lam3, lam_home, lam_away))
         probs = np.zeros((max_goals + 1, max_goals + 1))
@@ -2523,7 +2811,7 @@ class AdvancedMathEngine:
         return probs
 
     @staticmethod
-    def zero_inflated_nbinom_probs(lam_home: float, lam_away: float, max_goals: int = 10,
+    def zero_inflated_nbinom_probs(lam_home: float, lam_away: float, max_goals: int = Constants.DEFAULT_MAX_GOALS,
                                     p0_home: float = 0.08, p0_away: float = 0.08,
                                     dispersion: float = 10.0) -> NDArray:
         r = max(2.0, min(40.0, float(dispersion or 10.0)))
@@ -2924,10 +3212,12 @@ class SQLiteAsyncConnection:
     async def close(self):
         return await _to_thread_compat(self._conn.close)
 
+#region Database
 # ======================================================================
 # DATABASE (with connection pool and migrations)
 # ======================================================================
 class Database:
+    """SQLite async wrapper with connection pooling, migrations, and schema versioning."""
     def __init__(self):
         self.path = CONFIG.db_path if not CONFIG.in_memory_db else ":memory:"
         self.pool = None
@@ -3403,6 +3693,7 @@ class Database:
 # REDIS CACHE
 # ======================================================================
 class RedisCache:
+    """Optional Redis-backed cache for cross-process feature and prediction reuse."""
     def __init__(self, url=None, ttl=3600):
         self.url = url or CONFIG.redis_url
         self.ttl = ttl
@@ -3498,6 +3789,7 @@ class RedisCache:
 # EXCHANGE CLIENT
 # ======================================================================
 class ExchangeClient:
+    """Betting exchange API wrapper (Betfair/Betdaq) with order placement and market streaming."""
     def __init__(self):
         self.exchange_type = CONFIG.exchange_type.lower()
         self.key = CONFIG.exchange_key
@@ -3769,6 +4061,7 @@ class BetikaClient:
 
 
 class BookmakerManager:
+    """Manages multiple bookmaker clients, bet placement, settlement, and limit tracking."""
     def settle_bet(self, selection, actual_score, market, stake, odds, handicap=0.0, void=False):
         """Atomic settlement with push/half-win/loss handling."""
         try:
@@ -4267,10 +4560,16 @@ class MatchFeatureIntegrityGate:
 
 MATCH_FEATURE_INTEGRITY_GATE = MatchFeatureIntegrityGate()
 
+#region Feature Engine
 # ======================================================================
 # FEATURE ENGINE
 # ======================================================================
 class FeatureEngine:
+    """Extracts, caches, and validates features for matches. 
+    
+    Uses an async TTL cache to avoid recomputing features for the same fixture.
+    Tracks feature statistics for drift detection and missing-data diagnostics.
+    """
     _cache = {}
     _cache_ts = {}
     _cache_lock = asyncio.Lock()
@@ -4712,6 +5011,7 @@ class FeatureEngine:
         return feats
 
     @staticmethod
+    @functools.lru_cache(maxsize=1)
     def feature_order():
         base = [
             "elo_difference", "home_xg", "away_xg", "home_shots", "away_shots",
@@ -5092,13 +5392,13 @@ def validate_match_payload(payload: Dict[str, Any]) -> float:
         return 0.0
 
 
-def calculate_time_decay_weight(days_ago: float, league_volatility: float = 0.5) -> float:
+def calculate_time_decay_weight(days_ago: float, league_volatility: float = Constants.DEFAULT_LEAGUE_VOLATILITY) -> float:
     days_ago = max(0.0, float(days_ago or 0.0))
     base_alpha = 0.035 + 0.02 * max(0.0, min(1.0, float(league_volatility or 0.5)))
     return float(math.exp(-base_alpha * days_ago))
 
 
-def apply_exponential_time_decay(value: Any, days_ago: float, league_volatility: float = 0.5, neutral: float = 0.5) -> float:
+def apply_exponential_time_decay(value: Any, days_ago: float, league_volatility: float = Constants.DEFAULT_LEAGUE_VOLATILITY, neutral: float = Constants.DEFAULT_LEAGUE_VOLATILITY) -> float:
     try:
         value = float(value)
     except Exception:
@@ -5211,6 +5511,7 @@ class RustAccelerator:
 
 
 class Calculator:
+    """Statistical math engine: joint probability grids, expected goals, and market odds."""
     _match_probs_cache: Dict[Tuple[Any, ...], Tuple[float, NDArray]] = {}
 
     @staticmethod
@@ -5251,7 +5552,7 @@ class Calculator:
         return (prob * net_odds - 1) / (net_odds - 1)
 
     @staticmethod
-    def match_probs(lam_home: float, lam_away: float, max_goals: int = 10, match_row: Optional[Dict[str, Any]] = None) -> NDArray:
+    def match_probs(lam_home: float, lam_away: float, max_goals: int = Constants.DEFAULT_MAX_GOALS, match_row: Optional[Dict[str, Any]] = None) -> NDArray:
         cache_key = (
             round(float(lam_home or 0.0), 4),
             round(float(lam_away or 0.0), 4),
@@ -5335,7 +5636,7 @@ class Calculator:
             if line_lower.startswith("ah_") or line_lower.startswith("asianhandicap_"):
                 try:
                     line_val = float(line.split('_')[1])
-                except:
+                except Exception:
                     continue
                 prob = 0.0
                 if line_val < 0:
@@ -5362,7 +5663,7 @@ class Calculator:
             elif "ou" in line_lower:
                 try:
                     line_val = float(line.split('_')[1])
-                except:
+                except Exception:
                     continue
                 prob_over = 0.0
                 for hg in range(joint.shape[0]):
@@ -5386,7 +5687,7 @@ class Calculator:
                         kelly_stake = (prob * odds - 1) / (odds - 1) * bankroll * base_kelly if odds > 1.0 else 0.0
                         best_stake = min(kelly_stake, bankroll * max_stake_pct * 0.5)
                         best_line = line
-                except:
+                except Exception:
                     continue
             elif "btts" in line_lower:
                 prob_yes = float(np.sum(joint[1:, 1:]))
@@ -5628,14 +5929,31 @@ class TeamStrengthRating:
         We handle both by computing probabilities directly from the lambdas.
         """
         lam_home, lam_away = cls.expected_goals(home, away, tournament_gf, tournament_ga)
-        max_goals = 10
-        # Compute directly from Poisso 
+        max_goals = Constants.DEFAULT_MAX_GOALS
+        # Compute 1X2 directly from the Poisson goal marginals (Elo-prior path).
+        p_home = p_draw = p_away = 0.0
+        for i in range(max_goals + 1):
+            pi = (lam_home ** i) * math.exp(-lam_home) / math.factorial(i)
+            for j in range(max_goals + 1):
+                pj = (lam_away ** j) * math.exp(-lam_away) / math.factorial(j)
+                p = pi * pj
+                if i > j:
+                    p_home += p
+                elif i == j:
+                    p_draw += p
+                else:
+                    p_away += p
+        total = p_home + p_draw + p_away
+        if total <= 0:
+            return 0.35, 0.30, 0.35
+        return p_home / total, p_draw / total, p_away / total
 
 
 # ======================================================================
 # EXTERNAL MODEL INTEGRATOR
 # ======================================================================
 class ExternalModelIntegrator:
+    """Aggregates predictions from external models (XGBoost, LightGBM, etc.) with weighting."""
     def __init__(self):
         self.models = {}
         self._cache = {}
@@ -6398,6 +6716,7 @@ class ExternalModelIntegrator:
 # TRAINER (preserved)
 # ======================================================================
 class Trainer:
+    """Model training pipeline with cross-validation, calibration, and persistence."""
     @staticmethod
     def train_market(data, market, model_type="xgb", scaler=None, feature_mask=None, params=None):
         if data.empty or len(data) < CONFIG.min_samples_train:
@@ -6676,7 +6995,7 @@ class BayesianPoissonModel:
         return 1.3, 1.3
 
     def predict_probs(self, lam_home, lam_away):
-        max_goals = 10
+        max_goals = Constants.DEFAULT_MAX_GOALS
         joint = Calculator.match_probs(lam_home, lam_away)
         p_home = np.sum(joint[np.tril_indices_from(joint, k=-1)])
         p_draw = np.sum(np.diag(joint))
@@ -6724,7 +7043,7 @@ class AsianHandicap:
 class CorrectScoreEvaluator:
     @staticmethod
     def evaluate_all(lam_home, lam_away, odds_dict, min_edge=0.10, league_avg_goals=2.5):
-        max_goals = 10
+        max_goals = Constants.DEFAULT_MAX_GOALS
         joint = Calculator.match_probs(lam_home, lam_away, max_goals)
         lg = float(max(1.2, min(4.5, league_avg_goals or 2.5)))
         low_goal_factor = max(0.0, min(1.0, (2.6 - lg) / 1.4))
@@ -6996,6 +7315,7 @@ class Memory:
 # EDGE ENHANCER (with CLV, sharp moves, regime, calibration)
 # ======================================================================
 class EdgeEnhancer:
+    """Adjusts raw model edges using CLV, sharp-money signals, regime state, and calibration."""
     def __init__(self, db_pool):
         self.db = db_pool
         self.clv_history = deque(maxlen=1000)
@@ -7243,10 +7563,12 @@ class RegimeSwitcher:
             return edge * 0.8
         return edge
 
+#region Risk Manager
 # ======================================================================
 # RISK MANAGER (with exposure release, daily reset)
 # ======================================================================
 class RiskManager:
+    """Stake-sizing, drawdown enforcement, and bet-placement risk gating."""
     def __init__(self, state):
         self.state = state
         self._lock = asyncio.Lock()
@@ -9847,7 +10169,7 @@ class RealDataFetcher:
                                                     if isinstance(parsed, list) and len(parsed) > 0:
                                                         cards = parsed
                                                         break
-                                                except:
+                                                except Exception:
                                                     pass
                                     if isinstance(cards, list) and len(cards) > 0 and isinstance(cards[0], dict):
                                         # JSON data found
@@ -10444,6 +10766,7 @@ class TeamMapper:
         return list(dict.fromkeys(candidate for candidate in candidates if candidate))
 
     @staticmethod
+    @functools.lru_cache(maxsize=8192)
     def normalize(name):
         TeamMapper.load_mapping()
         for candidate in TeamMapper._candidate_keys(name):
@@ -11556,6 +11879,7 @@ class BankrollManager:
 # BACKTEST ENGINE
 # ======================================================================
 class BacktestEngine:
+    """Historical backtesting runner with walk-forward validation and performance reporting."""
     def __init__(self, dept, state, db):
         self.dept = dept
         self.state = state
@@ -13103,6 +13427,7 @@ math_x_engine = MathX596()
 # UNIFIED MATH ENGINE
 # ======================================================================
 class UnifiedMathEngine:
+    """Registry of 596+ statistical/mathematical methods used across the prediction stack."""
     _executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
     _BUILTIN_REGISTRY: Dict[str, Callable] = {}
     _METHOD_TAGS: Dict[str, str] = {}
@@ -13330,6 +13655,7 @@ async def integrate_unified_engine(dept):
 # FULL OMNIDEPARTMENT (now a coordinator with services)
 # ======================================================================
 class OmniDepartment:
+    """Top-level coordinator: wires prediction, risk, data, and upgrade components together."""
     def __init__(self, db, state, memory):
         self.db = db
         self.state = state
@@ -14684,10 +15010,12 @@ class OmniDepartment:
         self.walk_forward_results = execute_walk_forward_backtest(hist, window_months=max(1, int(getattr(CONFIG, "walk_forward_window_months", 3))))
         await tuner.tune(hist)
 
+#region Orchestrator
 # ======================================================================
 # FULL ORCHESTRATOR
 # ======================================================================
 class Orchestrator:
+    """Main event loop and state machine: fetch, predict, decide, and (optionally) place bets."""
     def __init__(self, db, state, memory, dept):
         self.db = db
         self.state = state
@@ -15983,6 +16311,7 @@ class Orchestrator:
         except Exception as exc:
             log.warning(f"Websocket stop during kill failed: {exc}")
 
+#region FastAPI Application
 # ======================================================================
 # FASTAPI APPLICATION
 # ======================================================================
@@ -17250,7 +17579,7 @@ async def main():
                     _METRICS["last_cycle_ts"] = time.time()
                 except Exception:
                     pass
-            if cycle % 10 == 0:
+            if cycle % Constants.DEFAULT_HEARTBEAT_INTERVAL_CYCLES == 0:
                 try:
                     await orchestrator._send_heartbeat()
                 except Exception as exc:
@@ -17271,12 +17600,14 @@ async def main():
             await send_alert_async(f"CRASH: {e}. Restart in 120s.")
             await asyncio.sleep(120)
 
+#region Upgrades
 # ======================================================================
 # LHM UPGRADES - INSTITUTIONAL GRADE ADD-ONS (26 upgrades embedded)
 # ======================================================================
 # GROUP A: DATA PIPELINE & REALITY GATE
 # ======================================================================
 class OfficialFeedGateway:
+    """Primary odds/events gateway: Sportmonks, Betfair, and free-scraper fallbacks."""
     def __init__(self, primary_source: str = "sportmonks", fallback_fetcher=None):
         self.primary_source = primary_source
         self.fallback_fetcher = fallback_fetcher
@@ -19631,6 +19962,7 @@ class _UndetectableConfig:
     pico_timeout: float = 2.0
 
 class _HumanBehaviorEngine:
+    """Generates human-like timing distributions for mouse movements and keystrokes."""
     @staticmethod
     def lognormal_delay(mean: float = 0.0, sigma: float = 0.5) -> float:
         delay = _np.random.lognormal(mean=mean, sigma=sigma)
@@ -19841,7 +20173,7 @@ class _PlaywrightStealthController:
                 await self.browser.close()
             if self._playwright:
                 await self._playwright.stop()
-        except:
+        except Exception:
             pass
 
 class _CurlCffiController:
@@ -20032,7 +20364,7 @@ class _SessionPool:
         for session in self.sessions:
             try:
                 await session["controller"].close()
-            except:
+            except Exception:
                 pass
         self.sessions.clear()
         self.session_timestamps.clear()
@@ -20106,7 +20438,7 @@ class UndetectableScraper:
             if wait_for_selector:
                 try:
                     await controller.page.wait_for_selector(wait_for_selector, timeout=10000)
-                except:
+                except Exception:
                     pass
             content = await controller.get_page_content()
             if self.captcha_detector.detect(content):
@@ -20173,6 +20505,7 @@ class UndetectableScraper:
         self.hid.disconnect()
 
 
+#region Ghost Protocol
 # ======================================================================
 # LHM GHOST PROTOCOL - HARDWARE HID LAYER
 # Raspberry Pi Pico + OpenCV Computer Vision = Undetectable Bot
@@ -20479,10 +20812,23 @@ class VisionEngine:
 # ======================================================================
 
 class GhostProtocol:
-    """Main Ghost Protocol controller. Integrates Pico HID + OpenCV Vision."""
+    """EXPERIMENTAL: Hardware HID automation layer for physical bet-placement via Pico microcontroller.
+    
+    This is opt-in only (ghost_protocol_enabled=False by default). It is isolated from the core
+    prediction engine because it involves OS-level input simulation, which is unusual for a betting
+    system and may trigger security review. Enable only if you understand the implications.
+    """
     
     def __init__(self, config: Optional[GhostConfig] = None):
         self.config = config or GhostConfig()
+        if not self.config.enabled:
+            log.warning("GhostProtocol instantiated but disabled in config; no hardware will be accessed.")
+            self.hid = None
+            self.vision = None
+            self.human = None
+            self.running = False
+            self.bets_this_session = 0
+            return
         self.hid = PicoHIDInterface(self.config)
         self.vision = VisionEngine(self.config)
         self.human = HumanBehaviorEngine()
@@ -20492,8 +20838,8 @@ class GhostProtocol:
         self.running = False
     
     def initialize(self) -> bool:
-        if not self.config.enabled:
-            log.info("Ghost Protocol disabled in config")
+        if not self.config.enabled or self.hid is None:
+            log.info("Ghost Protocol disabled or not initialized")
             return False
         if not self.hid.connect():
             log.warning("Pico not connected - running in simulation mode")
@@ -20502,10 +20848,15 @@ class GhostProtocol:
         return True
     
     def human_delay(self, base_seconds: float = 1.0):
+        if self.human is None:
+            return
         delay = self.human.lognormal_delay() * base_seconds
         time.sleep(max(0.1, delay))
     
     def move_to_element(self, template_name: str, duration_ms: int = 800) -> bool:
+        if self.vision is None or self.hid is None or self.human is None:
+            log.warning("GhostProtocol disabled; cannot move to element")
+            return False
         screen = self.vision.capture_screen()
         if screen is None:
             return False
@@ -20522,6 +20873,9 @@ class GhostProtocol:
         return True
     
     def click_element(self, template_name: str) -> bool:
+        if self.hid is None:
+            log.warning("GhostProtocol disabled; cannot click element")
+            return False
         if not self.move_to_element(template_name):
             return False
         self.hid.click(0)
@@ -20529,6 +20883,8 @@ class GhostProtocol:
         return True
     
     def detect_captcha(self, screen: Optional[np.ndarray] = None) -> bool:
+        if self.vision is None:
+            return False
         if screen is None:
             screen = self.vision.capture_screen()
         if screen is None:
@@ -20542,6 +20898,9 @@ class GhostProtocol:
         return False
     
     def handle_captcha(self):
+        if self.vision is None:
+            log.warning("GhostProtocol disabled; cannot handle CAPTCHA")
+            return False
         log.warning("CAPTCHA detected! Pausing for 4 hours...")
         screen = self.vision.capture_screen()
         if screen:
@@ -20551,6 +20910,9 @@ class GhostProtocol:
         return True
     
     def place_bet_sequence(self, bookmaker: str, selection: str, stake: float) -> bool:
+        if self.hid is None:
+            log.warning("GhostProtocol disabled; cannot place bet via HID")
+            return False
         log.info(f"Placing bet: {bookmaker} - {selection} - ${stake}")
         if self.bets_this_session >= self.config.max_bets_per_bookmaker:
             log.warning("Max bets per session reached")
@@ -20608,6 +20970,7 @@ class GhostProtocol:
 # ======================================================================
 
 class GhostServiceInstaller:
+    """Installs Ghost Protocol as a Windows service with startup persistence."""
     @staticmethod
     def install() -> bool:
         try:
@@ -20817,5 +21180,1337 @@ def ghost_main():
     ghost.run_session()
 
 
+# ======================================================================
+#region Virtual Sports
+# ======================================================================
+# ISOLATED virtual-sports subsystem. It NEVER intersects with real matches:
+#  - own cache (VIRTUAL_SPORTS_CACHE) and own fixture-id namespace (virt_*)
+#  - gated behind a dominant switch (VIRTUAL_SPORTS_ACTIVE) that is OFF
+#    unless virtual sports are explicitly requested
+#  - does not read/write the real matches/predictions tables or DB
+# ======================================================================
+import hmac
+
+
+# ----------------------------------------------------------------------
+# PRNG - fast, seedable, deterministic pseudo-random generator (xorshift128+)
+# ----------------------------------------------------------------------
+class PRNG:
+    """Fast seedable PRNG (xorshift128+). Not cryptographically secure."""
+
+    __slots__ = ("_s0", "_s1")
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        s = int(seed if seed is not None else (int(time.time() * 1000) ^ id(self))) & 0xFFFFFFFFFFFFFFFF
+        self._s0 = (s ^ 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+        self._s1 = (s * 0x2545F4914F6CDD1D) & 0xFFFFFFFFFFFFFFFF
+
+    def _next64(self) -> int:
+        s1 = self._s0
+        s0 = self._s1
+        self._s0 = s0
+        s1 ^= (s1 << 23) & 0xFFFFFFFFFFFFFFFF
+        self._s1 = s1 ^ s0 ^ (s1 >> 18) ^ (s0 >> 5)
+        return (self._s1 + s0) & 0xFFFFFFFFFFFFFFFF
+
+    def random(self) -> float:
+        return (self._next64() >> 11) * (1.0 / (1 << 53))
+
+    def randint(self, low: int, high: int) -> int:
+        if high <= low:
+            return low
+        return low + int(self.random() * (high - low + 1))
+
+    def choice(self, seq):
+        return seq[self.randint(0, len(seq) - 1)]
+
+    def gauss(self, mu: float = 0.0, sigma: float = 1.0) -> float:
+        u1 = max(self.random(), 1e-12)
+        u2 = self.random()
+        z0 = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+        return mu + sigma * z0
+
+    def shuffle(self, seq):
+        for i in range(len(seq) - 1, 0, -1):
+            j = self.randint(0, i)
+            seq[i], seq[j] = seq[j], seq[i]
+        return seq
+
+
+# ----------------------------------------------------------------------
+# CPRNG - cryptographically secure PRNG (HMAC-SHA256 DRBG, NIST SP800-90A style)
+# ----------------------------------------------------------------------
+class CPRNG:
+    """Cryptographically secure PRNG backed by HMAC-SHA256 (no external crypto libs needed)."""
+
+    __slots__ = ("_key", "_v", "_reseed_counter", "_reseed_interval")
+
+    def __init__(self, seed: Optional[bytes] = None, reseed_interval: int = 1 << 14) -> None:
+        self._reseed_interval = max(1, int(reseed_interval))
+        ent = seed if seed is not None else os.urandom(32)
+        if len(ent) < 8:
+            ent = (ent + os.urandom(32))[:32]
+        self._key = b"\x00" * 32
+        self._v = b"\x01" * 32
+        self._reseed_counter = 1
+        self.reseed(ent)
+
+    @staticmethod
+    def _hmac(key: bytes, data: bytes) -> bytes:
+        return hmac.new(key, data, hashlib.sha256).digest()
+
+    def reseed(self, entropy: bytes) -> None:
+        self._key = self._hmac(self._key, self._v + b"\x00" + entropy)
+        self._v = self._hmac(self._key, self._v)
+        self._reseed_counter = 1
+
+    def _generate(self, n: int) -> bytes:
+        if self._reseed_counter > self._reseed_interval or self._reseed_counter == 0:
+            self.reseed(os.urandom(32))
+        out = b""
+        while len(out) < n:
+            self._v = self._hmac(self._key, self._v)
+            out += self._v
+        self._reseed_counter += 1
+        return out[:n]
+
+    def random(self) -> float:
+        return int.from_bytes(self._generate(8), "big") / (1 << 64)
+
+    def randint(self, low: int, high: int) -> int:
+        if high <= low:
+            return low
+        return low + int(self.random() * (high - low + 1))
+
+    def choice(self, seq):
+        return seq[self.randint(0, len(seq) - 1)]
+
+    def bytes(self, n: int) -> bytes:
+        return self._generate(n)
+
+    def gauss(self, mu: float = 0.0, sigma: float = 1.0) -> float:
+        u1 = max(self.random(), 1e-12)
+        u2 = self.random()
+        z0 = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+        return mu + sigma * z0
+
+
+# ----------------------------------------------------------------------
+# Virtual Sports configuration + dominant switch (isolated from real matches)
+# ----------------------------------------------------------------------
+class VirtualSportsConfig(BaseModel):
+    """Isolated configuration for the virtual-sports subsystem."""
+    enabled: bool = False
+    default_sport: str = "football"
+    supported_sports: List[str] = Field(default_factory=lambda: ["football", "basketball", "tennis", "horse_racing"])
+    num_simulations: int = 20000
+    bookmaker_margin: float = 0.08
+    use_cprng_for_official: bool = True
+    seed: Optional[int] = None
+    virtual_leagues: List[str] = Field(default_factory=lambda: ["VIRTUAL-SUPER-LEAGUE", "VIRTUAL-PRIME-CUP", "VIRTUAL-GLOBAL-SERIES"])
+    home_advantage: float = 0.12
+    max_goals: int = 12
+    # Round generation / auto-reporting (engine loop) - only active when dominant switch is ON
+    auto_send_round: bool = True
+    round_interval_minutes: int = 30
+    round_fixtures_per_league: int = 3
+    # Fixed virtual team pool per sport so rounds are reproducible and isolated from real teams
+    virtual_teams: Dict[str, List[str]] = Field(default_factory=lambda: {
+        "football": [
+            "Virt FC A", "Virt FC B", "Neon United", "Pulse City", "Cyber Rovers",
+            "Quantum Athletic", "Solar Wanderers", "Lunar Tigers", "Apex Strikers", "Vertex Galaxy",
+            "Nova Royals", "Echo Comets",
+        ],
+        "basketball": [
+            "Court Phantoms", "Rim Reapers", "Hoop Vipers", "Net Nomads", "Dunk Dragons", "Arc Arrows",
+        ],
+        "tennis": [
+            "Rally Ryker", "Serve Specter", "Volley Vortex", "Baseline Blaze", "Smash Spectre", "Topspin Titan",
+        ],
+        "horse_racing": [
+            "Thunder Dash", "Midnight Gallop", "Silver Hoof", "Storm Colt", "Golden Mane", "Comet Trot",
+        ],
+    })
+
+
+VIRTUAL_SPORTS_CONFIG = VirtualSportsConfig()
+VIRTUAL_SPORTS_ACTIVE = False  # DOMINANT SWITCH - OFF until virtual sports are requested
+
+
+class VirtualSportsSwitch:
+    """Dominant runtime switch for the virtual-sports subsystem."""
+
+    @classmethod
+    def enable(cls, sport: Optional[str] = None) -> None:
+        global VIRTUAL_SPORTS_ACTIVE
+        VIRTUAL_SPORTS_ACTIVE = True
+        VIRTUAL_SPORTS_CONFIG.enabled = True
+        if sport:
+            VIRTUAL_SPORTS_CONFIG.default_sport = sport
+        log.info("VirtualSportsSwitch: ENABLED (sport=%s)", VIRTUAL_SPORTS_CONFIG.default_sport)
+
+    @classmethod
+    def disable(cls) -> None:
+        global VIRTUAL_SPORTS_ACTIVE
+        VIRTUAL_SPORTS_ACTIVE = False
+        VIRTUAL_SPORTS_CONFIG.enabled = False
+        log.info("VirtualSportsSwitch: disabled")
+
+    @classmethod
+    def is_active(cls) -> bool:
+        return VIRTUAL_SPORTS_ACTIVE
+
+    @classmethod
+    def ensure_active(cls) -> None:
+        if not VIRTUAL_SPORTS_ACTIVE:
+            raise RuntimeError("Virtual sports are OFF. Call enable_virtual_sports() first.")
+
+
+def enable_virtual_sports(sport: Optional[str] = None) -> Dict[str, Any]:
+    """Turn on the virtual-sports dominant switch."""
+    VirtualSportsSwitch.enable(sport)
+    return {"status": "enabled", "sport": VIRTUAL_SPORTS_CONFIG.default_sport,
+            "supported": VIRTUAL_SPORTS_CONFIG.supported_sports}
+
+
+# ----------------------------------------------------------------------
+# Virtual Sports Engine (isolated cache, virt_ fixture ids, no DB writes)
+# ----------------------------------------------------------------------
+VIRTUAL_SPORTS_CACHE: Dict[str, Any] = {}
+VIRTUAL_TEAM_STRENGTH: Dict[str, float] = {}
+
+
+class VirtualSportsEngine:
+    """Simulates virtual matches and produces predictions/odds using PRNG/CPRNG.
+    Fully isolated from real matches: separate cache, separate id namespace, no DB writes."""
+
+    @classmethod
+    def _rng(cls, official: bool = False) -> Any:
+        if official and VIRTUAL_SPORTS_CONFIG.use_cprng_for_official:
+            return CPRNG()
+        return PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+
+    @classmethod
+    def _team_strength(cls, team: str) -> float:
+        if team not in VIRTUAL_TEAM_STRENGTH:
+            rng = PRNG(seed=abs(hash(team)) & 0xFFFFFFFFFFFFFFFF)
+            VIRTUAL_TEAM_STRENGTH[team] = 0.6 + rng.random() * 0.8
+        return VIRTUAL_TEAM_STRENGTH[team]
+
+    @classmethod
+    def _poisson(cls, lam: float, rng: Any) -> int:
+        if lam <= 0:
+            return 0
+        L = math.exp(-lam)
+        k = 0
+        p = 1.0
+        while True:
+            k += 1
+            p *= rng.random()
+            if p <= L:
+                return k - 1
+
+    @classmethod
+    def simulate_match(cls, home: str, away: str, sport: str = "football",
+                       rng: Optional[Any] = None, max_goals: Optional[int] = None) -> Dict[str, Any]:
+        rng = rng or cls._rng()
+        max_goals = max_goals or VIRTUAL_SPORTS_CONFIG.max_goals
+        sh = cls._team_strength(home)
+        sa = cls._team_strength(away)
+        ha = VIRTUAL_SPORTS_CONFIG.home_advantage if sport == "football" else 0.0
+        lam_home = max(0.05, (sh + ha) * 1.25)
+        lam_away = max(0.05, sa * 1.25)
+        hg = min(cls._poisson(lam_home, rng), max_goals)
+        ag = min(cls._poisson(lam_away, rng), max_goals)
+        return {"home": home, "away": away, "home_goals": hg, "away_goals": ag,
+                "sport": sport, "lam_home": lam_home, "lam_away": lam_away}
+
+    @classmethod
+    def predict(cls, fixture_id: str, home: str, away: str, sport: Optional[str] = None,
+                num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        """Monte-Carlo prediction for a virtual fixture. Isolated from real matches."""
+        VirtualSportsSwitch.ensure_active()
+        sport = sport or VIRTUAL_SPORTS_CONFIG.default_sport
+        vid = f"virt_{fixture_id}"
+        if vid in VIRTUAL_SPORTS_CACHE:
+            return VIRTUAL_SPORTS_CACHE[vid]
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = cls._rng(official=False)
+        home_w = draw_w = away_w = btts_y = 0
+        cs_grid: Dict[str, int] = {}
+        max_goals = VIRTUAL_SPORTS_CONFIG.max_goals
+        sh = cls._team_strength(home)
+        sa = cls._team_strength(away)
+        ha = VIRTUAL_SPORTS_CONFIG.home_advantage if sport == "football" else 0.0
+        lam_home = max(0.05, (sh + ha) * 1.25)
+        lam_away = max(0.05, sa * 1.25)
+        for _ in range(n):
+            hg = min(cls._poisson(lam_home, rng), max_goals)
+            ag = min(cls._poisson(lam_away, rng), max_goals)
+            if hg > ag:
+                home_w += 1
+            elif hg == ag:
+                draw_w += 1
+            else:
+                away_w += 1
+            if hg >= 1 and ag >= 1:
+                btts_y += 1
+            key = f"{hg}-{ag}"
+            cs_grid[key] = cs_grid.get(key, 0) + 1
+        ph, pd_, pa = home_w / n, draw_w / n, away_w / n
+        btts = btts_y / n
+        top_cs = max(cs_grid.items(), key=lambda kv: kv[1])
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        result = {
+            "fixture_id": vid, "virtual": True, "sport": sport,
+            "home": home, "away": away,
+            "prob_home": round(ph, 4), "prob_draw": round(pd_, 4), "prob_away": round(pa, 4),
+            "btts_yes": round(btts, 4), "btts_no": round(1 - btts, 4),
+            "top_correct_score": top_cs[0], "top_cs_prob": round(top_cs[1] / n, 4),
+            "fair_odds": {"home": round(inv(ph), 2), "draw": round(inv(pd_), 2), "away": round(inv(pa), 2)},
+            "bookmaker_odds": {"home": round(inv(ph) * (1 - margin), 2),
+                               "draw": round(inv(pd_) * (1 - margin), 2),
+                               "away": round(inv(pa) * (1 - margin), 2)},
+            "lam_home": round(lam_home, 3), "lam_away": round(lam_away, 3),
+            "simulations": n,
+        }
+        VIRTUAL_SPORTS_CACHE[vid] = result
+        return result
+
+    @classmethod
+    def official_result(cls, fixture_id: str, home: str, away: str, sport: Optional[str] = None) -> Dict[str, Any]:
+        """Tamper-evident 'official' virtual result using the CPRNG."""
+        VirtualSportsSwitch.ensure_active()
+        sport = sport or VIRTUAL_SPORTS_CONFIG.default_sport
+        cprng = CPRNG()
+        seed_commit = hashlib.sha256(cprng.bytes(32)).hexdigest()
+        res = cls.simulate_match(home, away, sport, rng=cprng)
+        res["seed_commit"] = seed_commit
+        res["fixture_id"] = f"virt_{fixture_id}"
+        res["virtual"] = True
+        return res
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        VIRTUAL_SPORTS_CACHE.clear()
+
+
+def predict_virtual_sports(fixture_id: str, home: str, away: str, sport: Optional[str] = None,
+                           num_simulations: Optional[int] = None, auto_enable: bool = True) -> Dict[str, Any]:
+    """Public API: predict a virtual fixture. Auto-enables the dominant switch when requested."""
+    if auto_enable and not VirtualSportsSwitch.is_active():
+        VirtualSportsSwitch.enable(sport)
+    return VirtualSportsEngine.predict(fixture_id, home, away, sport, num_simulations)
+
+
+def demo_virtual_sports() -> List[Dict[str, Any]]:
+    """Run a quick isolated demo of the virtual-sports engine."""
+    enable_virtual_sports("football")
+    fixtures = [("Virt FC A", "Virt FC B"), ("Neon United", "Pulse City"), ("Cyber Rovers", "Quantum Athletic")]
+    out = []
+    for i, (h, a) in enumerate(fixtures):
+        out.append(predict_virtual_sports(f"demo{i}", h, a))
+    return out
+
+
+#endregion Virtual Sports
+
+
+# ======================================================================
+#region Advanced Virtual Sports & Casino Prediction Layer
+# ======================================================================
+#  Full extension layer: additional virtual-sports models, casino game
+#  simulators, RNG analysis tools, betting strategy, backtesting, and
+#  Telegram commands.  Fully isolated from real matches and gated by the
+#  dominant VIRTUAL_SPORTS_ACTIVE switch (OFF by default).
+# ======================================================================
+
+# ----------------------------------------------------------------------
+# Advanced Virtual Sports Models - Basketball, Tennis, Horse Racing,
+# Cricket, Baseball, Boxing, MMA, Esports, Darts, Snooker
+# ----------------------------------------------------------------------
+
+class AdvancedVirtualSportsEngine:
+    """Extends VirtualSportsEngine with additional sport models."""
+
+    @classmethod
+    def predict_basketball(cls, home: str, away: str,
+                           num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        lam_home = max(0.05, sh * 1.1)
+        lam_away = max(0.05, sa * 1.1)
+        hpts = ap = bpts = 0
+        for _ in range(n):
+            hg = min(VirtualSportsEngine._poisson(lam_home, rng), 150)
+            ag = min(VirtualSportsEngine._poisson(lam_away, rng), 150)
+            hpts += hg
+            ap += ag
+            bpts += 1.0 if hg > ag else (0.5 if hg == ag else 0.0)
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        ph = bpts / n
+        pa = 1.0 - ph
+        return {
+            "fixture_id": f"virt_{home}|{away}|basketball",
+            "virtual": True, "sport": "basketball",
+            "home": home, "away": away,
+            "prob_home": round(ph, 4), "prob_away": round(pa, 4),
+            "fair_odds": {"home": round(inv(ph), 2), "away": round(inv(pa), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(ph) * (1 - margin), 2),
+                "away": round(inv(pa) * (1 - margin), 2),
+            },
+            "avg_home_points": round(hpts / n, 1),
+            "avg_away_points": round(ap / n, 1),
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_tennis(cls, home: str, away: str,
+                       num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hgs = ags = 0
+            while hgs < 2 and ags < 2:
+                hg = min(cls._tennis_games(sh, rng), 7)
+                ag = min(cls._tennis_games(sa, rng), 7)
+                if hg > ag:
+                    hgs += 1
+                elif ag > hg:
+                    ags += 1
+                else:
+                    hgs += 1
+            if hgs > ags:
+                hw += 1
+            else:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        ph = hw / n
+        pa = aw / n
+        return {
+            "fixture_id": f"virt_{home}|{away}|tennis",
+            "virtual": True, "sport": "tennis",
+            "home": home, "away": away,
+            "prob_home": round(ph, 4), "prob_away": round(pa, 4),
+            "fair_odds": {"home": round(inv(ph), 2), "away": round(inv(pa), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(ph) * (1 - margin), 2),
+                "away": round(inv(pa) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @staticmethod
+    def _tennis_games(strength: float, rng: Any) -> int:
+        lam = max(0.5, strength * 4.0)
+        return VirtualSportsEngine._poisson(lam, rng)
+
+    @classmethod
+    def predict_horse_race(cls, race_id: str, horses: List[str],
+                           num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        wins: Dict[str, int] = {h: 0 for h in horses}
+        for _ in range(n):
+            strengths = [(h, VirtualSportsEngine._team_strength(h) + rng.gauss(0, 0.1))
+                         for h in horses]
+            strengths.sort(key=lambda x: x[1], reverse=True)
+            wins[strengths[0][0]] += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{race_id}|horse_race",
+            "virtual": True, "sport": "horse_racing",
+            "horses": horses,
+            "win_probs": {h: round(w / n, 4) for h, w in wins.items()},
+            "bookmaker_odds": {h: round(inv(w / n) * (1 - margin), 2)
+                               for h, w in wins.items()},
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_esports(cls, home: str, away: str, game: str = "csgo",
+                        num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hs = max(0, round(sh + rng.gauss(0, 1.0)))
+            aas = max(0, round(sa + rng.gauss(0, 1.0)))
+            if hs > aas:
+                hw += 1
+            elif aas > hs:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        ph = hw / n
+        pa = aw / n
+        return {
+            "fixture_id": f"virt_{home}|{away}|{game}",
+            "virtual": True, "sport": f"esports_{game}",
+            "home": home, "away": away,
+            "prob_home": round(ph, 4), "prob_away": round(pa, 4),
+            "fair_odds": {"home": round(inv(ph), 2), "away": round(inv(pa), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(ph) * (1 - margin), 2),
+                "away": round(inv(pa) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_boxing(cls, home: str, away: str,
+                       num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = draw = 0
+        for _ in range(n):
+            diff = (sh - sa) + rng.gauss(0, 0.3)
+            if diff > 0.15:
+                hw += 1
+            elif diff < -0.15:
+                aw += 1
+            else:
+                draw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{home}|{away}|boxing",
+            "virtual": True, "sport": "boxing",
+            "home": home, "away": away,
+            "prob_home": round(hw / n, 4),
+            "prob_draw": round(draw / n, 4),
+            "prob_away": round(aw / n, 4),
+            "fair_odds": {
+                "home": round(inv(hw / n), 2),
+                "draw": round(inv(draw / n), 2),
+                "away": round(inv(aw / n), 2),
+            },
+            "bookmaker_odds": {
+                "home": round(inv(hw / n) * (1 - margin), 2),
+                "draw": round(inv(draw / n) * (1 - margin), 2),
+                "away": round(inv(aw / n) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_cricket(cls, home: str, away: str,
+                        num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hr = max(0, VirtualSportsEngine._poisson(max(0.5, sh * 1.3), rng))
+            ar = max(0, VirtualSportsEngine._poisson(max(0.5, sa * 1.3), rng))
+            if hr > ar:
+                hw += 1
+            elif ar > hr:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{home}|{away}|cricket",
+            "virtual": True, "sport": "cricket",
+            "home": home, "away": away,
+            "prob_home": round(hw / n, 4), "prob_away": round(aw / n, 4),
+            "fair_odds": {"home": round(inv(hw / n), 2), "away": round(inv(aw / n), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(hw / n) * (1 - margin), 2),
+                "away": round(inv(aw / n) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_baseball(cls, home: str, away: str,
+                         num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hr = max(0, VirtualSportsEngine._poisson(max(0.3, sh * 0.9), rng))
+            ar = max(0, VirtualSportsEngine._poisson(max(0.3, sa * 0.9), rng))
+            if hr > ar:
+                hw += 1
+            elif ar > hr:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{home}|{away}|baseball",
+            "virtual": True, "sport": "baseball",
+            "home": home, "away": away,
+            "prob_home": round(hw / n, 4), "prob_away": round(aw / n, 4),
+            "fair_odds": {"home": round(inv(hw / n), 2), "away": round(inv(aw / n), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(hw / n) * (1 - margin), 2),
+                "away": round(inv(aw / n) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_darts(cls, home: str, away: str,
+                      num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hs = round(sh + rng.gauss(0, 0.4))
+            aas = round(sa + rng.gauss(0, 0.4))
+            if hs > aas:
+                hw += 1
+            elif aas > hs:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{home}|{away}|darts",
+            "virtual": True, "sport": "darts",
+            "home": home, "away": away,
+            "prob_home": round(hw / n, 4), "prob_away": round(aw / n, 4),
+            "fair_odds": {"home": round(inv(hw / n), 2), "away": round(inv(aw / n), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(hw / n) * (1 - margin), 2),
+                "away": round(inv(aw / n) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+    @classmethod
+    def predict_snooker(cls, home: str, away: str,
+                        num_simulations: Optional[int] = None) -> Dict[str, Any]:
+        VirtualSportsSwitch.ensure_active()
+        n = num_simulations or VIRTUAL_SPORTS_CONFIG.num_simulations
+        rng = PRNG(seed=VIRTUAL_SPORTS_CONFIG.seed)
+        sh = VirtualSportsEngine._team_strength(home)
+        sa = VirtualSportsEngine._team_strength(away)
+        hw = aw = 0
+        for _ in range(n):
+            hs = max(0, round(sh + rng.gauss(0, 0.5)))
+            aas = max(0, round(sa + rng.gauss(0, 0.5)))
+            if hs > aas:
+                hw += 1
+            elif aas > hs:
+                aw += 1
+        inv = lambda p: (1.0 / p if p > 0 else 0.0)
+        margin = VIRTUAL_SPORTS_CONFIG.bookmaker_margin
+        return {
+            "fixture_id": f"virt_{home}|{away}|snooker",
+            "virtual": True, "sport": "snooker",
+            "home": home, "away": away,
+            "prob_home": round(hw / n, 4), "prob_away": round(aw / n, 4),
+            "fair_odds": {"home": round(inv(hw / n), 2), "away": round(inv(aw / n), 2)},
+            "bookmaker_odds": {
+                "home": round(inv(hw / n) * (1 - margin), 2),
+                "away": round(inv(aw / n) * (1 - margin), 2),
+            },
+            "simulations": n,
+        }
+
+
+# ----------------------------------------------------------------------
+# Casino Game Simulators - Aviator (Crash), Roulette, Blackjack, Slots,
+# Dice (Craps), Baccarat
+# ----------------------------------------------------------------------
+
+class AviatorGame:
+    """Simulates Aviator / Crash game with house-edge multiplier curve."""
+
+    def __init__(self, house_edge: float = 0.04, seed: Optional[int] = None) -> None:
+        self.house_edge = house_edge
+        self.rng = PRNG(seed=seed)
+
+    def next_crash(self) -> float:
+        e = 2**32
+        r = self.rng.random()
+        if r == 0.0:
+            return 1.0
+        h = math.floor(e * (1.0 - self.house_edge) / (e - r)) / 100.0
+        return max(1.0, h)
+
+    def simulate_round(self, cashout: Optional[float] = None) -> Dict[str, Any]:
+        crash = self.next_crash()
+        won = cashout is not None and cashout < crash
+        profit = (cashout - 1.0) if won else -1.0
+        return {"crash_point": round(crash, 2), "cashout": cashout,
+                "won": won, "profit": round(profit, 2)}
+
+    def run_strategy(self, rounds: int = 1000,
+                     cashout: float = 2.0) -> Dict[str, Any]:
+        results = [self.simulate_round(cashout=cashout) for _ in range(rounds)]
+        wins = [r for r in results if r["won"]]
+        roi = sum(r["profit"] for r in results)
+        return {
+            "rounds": rounds, "cashout_target": cashout,
+            "wins": len(wins), "losses": rounds - len(wins),
+            "total_profit": round(roi, 2), "roi": round(roi / rounds, 4),
+        }
+
+
+class RouletteWheel:
+    """European (single-zero) roulette simulator."""
+
+    NUMBERS = list(range(0, 37))
+    RED = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36}
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self.rng = PRNG(seed=seed)
+
+    def spin(self) -> Dict[str, Any]:
+        n = self.rng.choice(self.NUMBERS)
+        color = "green" if n == 0 else ("red" if n in self.RED else "black")
+        return {"number": n, "color": color,
+                "odd": (n % 2 == 1) if n != 0 else None}
+
+    def simulate_bet(self, bet_type: str, amount: float = 1.0,
+                     numbers: Optional[List[int]] = None) -> Dict[str, Any]:
+        spin = self.spin()
+        n = spin["number"]
+        won = False
+        payout = 0.0
+        if bet_type == "red" and n in self.RED:
+            won = True; payout = amount * 2
+        elif bet_type == "black" and n not in self.RED and n != 0:
+            won = True; payout = amount * 2
+        elif bet_type == "odd" and n != 0 and n % 2 == 1:
+            won = True; payout = amount * 2
+        elif bet_type == "even" and n != 0 and n % 2 == 0:
+            won = True; payout = amount * 2
+        elif bet_type == "single" and numbers and n in numbers:
+            won = True; payout = amount * 36
+        profit = payout - amount if won else -amount
+        return {**spin, "won": won, "payout": round(payout, 2),
+                "profit": round(profit, 2)}
+
+
+class BlackjackHand:
+    """Simplified blackjack hand simulator (single deck, dealer stands on 17)."""
+
+    DECK = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10] * 4
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self.rng = PRNG(seed=seed)
+        self.deck = self.DECK[:]
+        self.rng.shuffle(self.deck)
+
+    def draw(self) -> int:
+        return self.deck.pop() if self.deck else self.rng.randint(1, 11)
+
+    @staticmethod
+    def score(hand: List[int]) -> int:
+        s = sum(hand)
+        aces = hand.count(1)
+        while s > 21 and aces:
+            s -= 10
+            aces -= 1
+        return s
+
+    def play_round(self, bet: float = 1.0) -> Dict[str, Any]:
+        player = [self.draw(), self.draw()]
+        dealer = [self.draw(), self.draw()]
+        while BlackjackHand.score(player) < 17:
+            player.append(self.draw())
+        ds = BlackjackHand.score(dealer)
+        while ds < 17:
+            dealer.append(self.draw())
+            ds = BlackjackHand.score(dealer)
+        ps = BlackjackHand.score(player)
+        if ps > 21:
+            return {"player": player, "dealer": dealer,
+                    "result": "bust", "profit": round(-bet, 2)}
+        if ds > 21:
+            return {"player": player, "dealer": dealer,
+                    "result": "dealer_bust", "profit": round(bet, 2)}
+        if ps > ds:
+            return {"player": player, "dealer": dealer,
+                    "result": "win", "profit": round(bet, 2)}
+        if ps < ds:
+            return {"player": player, "dealer": dealer,
+                    "result": "lose", "profit": round(-bet, 2)}
+        return {"player": player, "dealer": dealer,
+                "result": "push", "profit": 0.0}
+
+
+class SlotMachine:
+    """Simplified 3-reel slot machine with configurable RTP and volatility."""
+
+    def __init__(self, rtp: float = 0.95, volatility: str = "medium",
+                 seed: Optional[int] = None) -> None:
+        self.rtp = rtp
+        self.volatility = volatility
+        self.rng = PRNG(seed=seed)
+        self.symbols = ["🍒", "🍋", "🍊", "🍇", "🔔", "💎", "7️⃣"]
+        self.weights = ([35, 25, 20, 10, 5, 3, 2]
+                        if volatility == "medium"
+                        else [40, 20, 15, 8, 4, 2, 1])
+
+    def spin(self) -> Dict[str, Any]:
+        reels = [self.rng.choice(self.symbols) for _ in range(3)]
+        multipliers = {"🍒": 2, "🍋": 3, "🍊": 5, "🍇": 8,
+                       "🔔": 10, "💎": 25, "7️⃣": 50}
+        if reels[0] == reels[1] == reels[2]:
+            payout = multipliers.get(reels[0], 10)
+        elif reels[0] == reels[1] or reels[1] == reels[2]:
+            payout = 2
+        else:
+            payout = 0
+        return {"reels": reels, "payout_multiplier": payout}
+
+    def simulate(self, rounds: int = 1000, bet: float = 1.0) -> Dict[str, Any]:
+        results = [self.spin() for _ in range(rounds)]
+        total_return = sum(r["payout_multiplier"] for r in results)
+        actual_rtp = total_return / (rounds * bet) if rounds * bet else 0.0
+        return {
+            "rounds": rounds, "bet": bet,
+            "total_returned": round(total_return * bet, 2),
+            "total_spent": round(rounds * bet, 2),
+            "actual_rtp": round(actual_rtp, 4),
+            "target_rtp": self.rtp,
+        }
+
+
+class DiceGame:
+    """Craps-style pass-line dice simulator."""
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self.rng = PRNG(seed=seed)
+
+    def roll(self) -> int:
+        return self.rng.randint(1, 6) + self.rng.randint(1, 6)
+
+    def pass_line_bet(self, bet: float = 1.0) -> Dict[str, Any]:
+        point = self.roll()
+        if point in (7, 11):
+            return {"result": "win", "point": point, "profit": round(bet, 2)}
+        if point in (2, 3, 12):
+            return {"result": "lose", "point": point, "profit": round(-bet, 2)}
+        while True:
+            r = self.roll()
+            if r == point:
+                return {"result": "win", "point": point, "roll": r,
+                        "profit": round(bet, 2)}
+            if r == 7:
+                return {"result": "lose", "point": point, "roll": r,
+                        "profit": round(-bet, 2)}
+
+
+class BaccaratGame:
+    """Baccarat shoe simulator (Player / Banker / Tie)."""
+
+    def __init__(self, seed: Optional[int] = None) -> None:
+        self.rng = PRNG(seed=seed)
+        self.shoe: List[int] = []
+        self._new_shoe()
+
+    def _new_shoe(self) -> None:
+        deck = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 0] * 4
+        self.rng.shuffle(deck)
+        self.shoe = deck
+
+    def _card_value(self, card: int) -> int:
+        return min(card, 9)
+
+    def play_hand(self, bet_on: str = "banker",
+                  bet: float = 1.0) -> Dict[str, Any]:
+        if len(self.shoe) < 20:
+            self._new_shoe()
+        player = [self.shoe.pop(), self.shoe.pop()]
+        banker = [self.shoe.pop(), self.shoe.pop()]
+        ps = sum(self._card_value(c) for c in player) % 10
+        bs = sum(self._card_value(c) for c in banker) % 10
+        if ps > bs:
+            winner = "player"
+        elif bs > ps:
+            winner = "banker"
+        else:
+            winner = "tie"
+        payout_map = {"player": 2.0, "banker": 1.95, "tie": 9.0}
+        profit = payout_map.get(winner, 0.0) * bet if winner == bet_on else -bet
+        return {
+            "player_cards": player, "banker_cards": banker,
+            "player_score": ps, "banker_score": bs,
+            "winner": winner, "bet_on": bet_on,
+            "profit": round(profit, 2),
+        }
+
+
+# ======================================================================
+# RNG Analysis / Fingerprinting (statistical, not side-channel)
+# ======================================================================
+
+class RNGAnalyzer:
+    """Statistical RNG analysis tools for educational / research purposes."""
+
+    @staticmethod
+    def ks_test(sequence: List[float]) -> float:
+        """Kolmogorov-Smirnov test for uniformity. Returns D statistic."""
+        try:
+            from scipy.stats import kstest  # type: ignore[import]
+            d, _ = kstest(sequence, "uniform")
+            return float(d)
+        except ImportError:
+            seq = sorted(sequence)
+            n = len(seq)
+            d = max(abs((i + 1) / n - v) for i, v in enumerate(seq))
+            return float(d)
+
+    @staticmethod
+    def runs_test(sequence: List[float]) -> float:
+        """Runs test for randomness. Returns z-statistic."""
+        med = sum(sequence) / len(sequence)
+        runs = 1
+        prev = sequence[0] >= med
+        for x in sequence[1:]:
+            curr = x >= med
+            if curr != prev:
+                runs += 1
+            prev = curr
+        n1 = sum(1 for x in sequence if x >= med)
+        n2 = len(sequence) - n1
+        if n1 == 0 or n2 == 0:
+            return 0.0
+        mu = (2 * n1 * n2) / (n1 + n2) + 1
+        var = (2 * n1 * n2 * (2 * n1 * n2 - n1 - n2)) / (
+            (n1 + n2) ** 2 * (n1 + n2 - 1)
+        )
+        sigma = math.sqrt(max(var, 1e-12))
+        return (runs - mu) / sigma if sigma else 0.0
+
+    @staticmethod
+    def autocorrelation(sequence: List[float], lag: int = 1) -> float:
+        """Autocorrelation at given lag."""
+        n = len(sequence)
+        if n <= lag:
+            return 0.0
+        mean = sum(sequence) / n
+        num = sum((sequence[i] - mean) * (sequence[i + lag] - mean)
+                  for i in range(n - lag))
+        den = sum((x - mean) ** 2 for x in sequence)
+        return num / den if den else 0.0
+
+    @staticmethod
+    def chi_square_uniform(sequence: List[float], bins: int = 10) -> float:
+        """Chi-square goodness-of-fit for uniform distribution."""
+        counts = [0] * bins
+        for x in sequence:
+            b = int(x * bins) % bins
+            counts[b] += 1
+        expected = len(sequence) / bins
+        return float(sum((c - expected) ** 2 / expected for c in counts))
+
+    @classmethod
+    def analyze(cls, sequence: List[float]) -> Dict[str, float]:
+        return {
+            "ks_d": round(cls.ks_test(sequence), 4),
+            "runs_z": round(cls.runs_test(sequence), 4),
+            "autocorr_lag1": round(cls.autocorrelation(sequence, 1), 4),
+            "chi2": round(cls.chi_square_uniform(sequence), 4),
+        }
+
+
+class ReseedDetector:
+    """Detect when a PRNG reseeds based on statistical drift."""
+
+    @staticmethod
+    def detect_variance_shift(sequence: List[float],
+                              window: int = 50) -> List[int]:
+        """Detect reseeds via variance shift (fallback without ruptures)."""
+        shifts = []
+        for i in range(window, len(sequence), window):
+            prev = sequence[i - window: i]
+            curr = sequence[i: i + window]
+            if len(prev) < 5 or len(curr) < 5:
+                continue
+            v1 = sum((x - sum(prev) / len(prev)) ** 2 for x in prev) / len(prev)
+            v2 = sum((x - sum(curr) / len(curr)) ** 2 for x in curr) / len(curr)
+            if v2 > 0 and (v1 / v2 > 3.0 or v2 / v1 > 3.0):
+                shifts.append(i)
+        return shifts
+
+
+# ======================================================================
+# Betting Strategy - Kelly, Value, Bankroll, Profit Tracker
+# ======================================================================
+
+class KellyCriterion:
+    """Optimal Kelly stake sizing."""
+
+    @staticmethod
+    def full_kelly(p: float, odds: float) -> float:
+        q = 1.0 - p
+        b = odds - 1.0
+        if b <= 0:
+            return 0.0
+        f = (b * p - q) / b
+        return max(0.0, f)
+
+    @staticmethod
+    def fractional_kelly(p: float, odds: float, fraction: float = 0.5) -> float:
+        return max(0.0, KellyCriterion.full_kelly(p, odds) * fraction)
+
+    @staticmethod
+    def kelly_with_confidence(p: float, odds: float,
+                              confidence: float = 1.0) -> float:
+        if confidence <= 0:
+            return 0.0
+        return max(0.0, KellyCriterion.full_kelly(p, odds) * min(confidence, 1.0))
+
+
+class ValueBetDetector:
+    """Detect value bets by comparing model probability to implied probability."""
+
+    @staticmethod
+    def implied_probability(odds: float) -> float:
+        return 1.0 / odds if odds > 0 else 0.0
+
+    @staticmethod
+    def edge(p: float, odds: float) -> float:
+        return p - ValueBetDetector.implied_probability(odds)
+
+    @staticmethod
+    def is_value(p: float, odds: float, min_edge: float = 0.05) -> bool:
+        return ValueBetDetector.edge(p, odds) >= min_edge
+
+    @staticmethod
+    def suggested_stake(p: float, odds: float, bankroll: float,
+                        fraction: float = 0.5) -> float:
+        edge = ValueBetDetector.edge(p, odds)
+        if edge <= 0:
+            return 0.0
+        kelly = KellyCriterion.full_kelly(p, odds)
+        return min(bankroll * kelly * fraction, bankroll * 0.1)
+
+
+class BankrollManager:
+    """Track bankroll, exposure, and enforce risk limits."""
+
+    def __init__(self, initial_bankroll: float = 1000.0,
+                 max_exposure: float = 0.3) -> None:
+        self.bankroll = initial_bankroll
+        self.max_exposure = max_exposure
+        self.exposure = 0.0
+        self.history: List[Dict[str, Any]] = []
+
+    def place_bet(self, stake: float, outcome: str,
+                  odds: float) -> Dict[str, Any]:
+        if stake > self.bankroll:
+            return {"status": "rejected", "reason": "insufficient_balance"}
+        if self.exposure + stake > self.bankroll * self.max_exposure:
+            return {"status": "rejected", "reason": "exposure_limit"}
+        self.bankroll -= stake
+        self.exposure += stake
+        entry = {"stake": stake, "outcome": outcome, "odds": odds,
+                 "timestamp": time.time(), "status": "pending"}
+        self.history.append(entry)
+        return {"status": "accepted", "entry": entry}
+
+    def settle(self, won: bool, stake: float, odds: float) -> None:
+        self.exposure = max(0.0, self.exposure - stake)
+        if won:
+            self.bankroll += stake * odds
+        self.history[-1]["status"] = "won" if won else "lost"
+
+    def summary(self) -> Dict[str, Any]:
+        total_staked = sum(e["stake"] for e in self.history
+                           if e["status"] != "pending")
+        wins = [e for e in self.history if e["status"] == "won"]
+        roi = ((self.bankroll - 1000.0) / 1000.0) if total_staked else 0.0
+        return {
+            "bankroll": round(self.bankroll, 2),
+            "exposure": round(self.exposure, 2),
+            "total_staked": round(total_staked, 2),
+            "roi": round(roi, 4),
+            "win_rate": round(len(wins) / len(self.history), 4)
+            if self.history else 0.0,
+        }
+
+
+class ProfitTracker:
+    """Track P&L across strategies and sports."""
+
+    def __init__(self) -> None:
+        self.bets: List[Dict[str, Any]] = []
+
+    def record(self, sport: str, market: str, stake: float, odds: float,
+               won: bool, profit: float) -> None:
+        self.bets.append({
+            "sport": sport, "market": market, "stake": stake,
+            "odds": odds, "won": won, "profit": profit,
+            "timestamp": time.time(),
+        })
+
+    def by_sport(self) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        for b in self.bets:
+            s = b["sport"]
+            if s not in out:
+                out[s] = {"stakes": 0.0, "profit": 0.0, "count": 0}
+            out[s]["stakes"] += b["stake"]
+            out[s]["profit"] += b["profit"]
+            out[s]["count"] += 1
+        for v in out.values():
+            v["roi"] = (round(v["profit"] / v["stakes"], 4)
+                        if v["stakes"] else 0.0)
+        return out
+
+    def summary(self) -> Dict[str, Any]:
+        total = len(self.bets)
+        wins = sum(1 for b in self.bets if b["won"])
+        profit = sum(b["profit"] for b in self.bets)
+        total_stake = sum(b["stake"] for b in self.bets)
+        return {
+            "total_bets": total,
+            "wins": wins,
+            "losses": total - wins,
+            "win_rate": round(wins / total, 4) if total else 0.0,
+            "total_profit": round(profit, 2),
+            "roi": round(profit / total_stake, 4) if total_stake else 0.0,
+        }
+
+
+# ======================================================================
+# Backtesting & Monte Carlo Simulation
+# ======================================================================
+
+class BacktestRunner:
+    """Run backtests on simulated or historical predictions."""
+
+    def __init__(self, bankroll: float = 1000.0,
+                 strategy: str = "kelly") -> None:
+        self.bankroll = bankroll
+        self.strategy = strategy
+        self.bm = BankrollManager(initial_bankroll=bankroll)
+
+    def run_simulation(self, predictions: List[Dict[str, Any]],
+                       actuals: List[Dict[str, Any]]) -> Dict[str, Any]:
+        for pred, act in zip(predictions, actuals):
+            p = pred.get("prob_home", 0.0)
+            odds = pred.get("bookmaker_odds", {}).get("home", 0.0)
+            stake = KellyCriterion.fractional_kelly(p, odds) * self.bankroll
+            if stake < 0.01:
+                continue
+            won = act.get("home_goals", 0) > act.get("away_goals", 0)
+            self.bm.place_bet(stake, "home", odds)
+            self.bm.settle(won, stake, odds)
+        return self.bm.summary()
+
+
+class MonteCarloSimulator:
+    """Monte Carlo simulation engine for strategy testing."""
+
+    def __init__(self, rng: Optional[PRNG] = None) -> None:
+        self.rng = rng or PRNG()
+
+    def simulate_league(self, teams: List[str],
+                        num_rounds: int = 38) -> List[Dict[str, Any]]:
+        results = []
+        for i in range(len(teams)):
+            for j in range(i + 1, len(teams)):
+                for _ in range(max(1, num_rounds // len(teams) + 1)):
+                    res = VirtualSportsEngine.predict(
+                        f"mc_{i}_{j}_{len(results)}", teams[i], teams[j]
+                    )
+                    results.append(res)
+        return results
+
+    def stress_test_kelly(self, p: float, odds: float,
+                          rounds: int = 10000) -> Dict[str, Any]:
+        stake = KellyCriterion.full_kelly(p, odds)
+        wins = 0
+        total_profit = 0.0
+        for _ in range(rounds):
+            won = self.rng.random() < p
+            profit = (stake * odds - stake) if won else -stake
+            total_profit += profit
+            if won:
+                wins += 1
+        return {
+            "kelly_fraction": round(stake, 4),
+            "roi": round(total_profit / (stake * rounds), 4) if stake else 0.0,
+            "win_rate": round(wins / rounds, 4),
+        }
+
+
+# ======================================================================
+# Round Generator & Telegram Formatter
+# ======================================================================
+
+class VirtualSportsRoundGenerator:
+    """Generate scheduled virtual sports rounds and send to Telegram."""
+
+    def __init__(self) -> None:
+        self.last_round_ts = 0.0
+
+    async def maybe_send_round(self, orchestrator: Any) -> None:
+        if not VIRTUAL_SPORTS_ACTIVE:
+            return
+        now = time.time()
+        interval = VIRTUAL_SPORTS_CONFIG.round_interval_minutes * 60
+        if now - self.last_round_ts < interval:
+            return
+        self.last_round_ts = now
+        await self._send_round(orchestrator)
+
+    async def _send_round(self, orchestrator: Any) -> None:
+        lines = [
+            f"Virtual Sports Round | {datetime.now().strftime('%Y-%m-%d %H:%M')} CET",
+            "Simulated odds only - not live bookmaker lines", "",
+        ]
+        teams = VIRTUAL_SPORTS_CONFIG.virtual_teams.get("football", [])
+        for idx in range(VIRTUAL_SPORTS_CONFIG.round_fixtures_per_league):
+            h = teams[idx % len(teams)]
+            a = teams[(idx + 1) % len(teams)]
+            res = VirtualSportsEngine.predict(
+                f"round_{int(time.time())}_{idx}", h, a
+            )
+            lines.append(self._format_pick(res))
+        await send_alert_async("\n".join(lines), level="info")
+
+    @staticmethod
+    def _format_pick(res: Dict[str, Any]) -> str:
+        lines = [
+            f"{res['home']} vs {res['away']} | {res['sport']}",
+            f"  1X2: {res['prob_home']:.3f} / {res.get('prob_draw', 0.0):.3f} / {res['prob_away']:.3f}",
+            f"  Fair odds: {res['fair_odds']['home']:.2f} / {res['fair_odds']['draw']:.2f} / {res['fair_odds']['away']:.2f}",
+        ]
+        if "btts_yes" in res:
+            lines.append(
+                f"  BTTS: {res['btts_yes']:.3f} yes / {res['btts_no']:.3f} no"
+            )
+        if "top_correct_score" in res:
+            lines.append(
+                f"  Top CS: {res['top_correct_score']} ({res['top_cs_prob']:.4f})"
+            )
+        if "avg_home_points" in res:
+            lines.append(
+                f"  Avg pts: {res['avg_home_points']:.1f} - {res['avg_away_points']:.1f}"
+            )
+        if "win_probs" in res:
+            top = max(res["win_probs"].items(), key=lambda kv: kv[1])
+            lines.append(f"  Fav: {top[0]} ({top[1]:.3f})")
+        return "\n".join(lines)
+
+
+# ======================================================================
+# Telegram commands for virtual sports and casino
+# ======================================================================
+
+class _VirtualSportsTelegramMixin:
+    """Mixin for Telegram virtual-sports and casino commands."""
+
+    async def _cmd_virtual(self, chat_id: Union[int, str], text: str) -> None:  # type: ignore[override]
+        parts = (text or "").strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else ""
+        if arg in ("off", "disable", "0"):
+            VirtualSportsSwitch.disable()
+            await self._reply(chat_id, "Virtual sports switched OFF.")
+            return
+        if arg in ("on", "enable", "1"):
+            VirtualSportsSwitch.enable("football")
+            await self._reply(chat_id, "Virtual sports switched ON (football).")
+            return
+        if arg in ("help", "?", ""):
+            await self._reply(chat_id,
+                "Virtual Sports Commands:\n"
+                "/virtual - demo round (3 football fixtures)\n"
+                "/virtual on|off - toggle\n"
+                "/virtual <sport> <home>|<away> - specific match\n"
+                "Sports: football, basketball, tennis, horse_racing, "
+                "esports, boxing, cricket, baseball, darts, snooker"
+            )
+            return
+        if "|" in arg:
+            home, away = arg.split("|", 1)
+            home = home.strip()
+            away = away.strip()
+            res = predict_virtual_sports(
+                f"tele_{int(time.time())}", home, away
+            )
+            await self._reply(
+                chat_id, VirtualSportsRoundGenerator._format_pick(res)
+            )
+            return
+        await self._reply(chat_id, "Usage: /virtual on|off|help|<home>|<away>")
+
+    async def _cmd_aviator(self, chat_id: Union[int, str]) -> None:  # type: ignore[override]
+        game = AviatorGame(house_edge=0.04)
+        sim = game.run_strategy(rounds=1000, cashout=2.0)
+        await self._reply(chat_id,
+            f"Aviator simulation (cashout=2.0x, 1000 rounds):\n"
+            f"ROI: {sim['roi']:+.2%} | Wins: {sim['wins']} | Losses: {sim['losses']}"
+        )
+
+    async def _cmd_roulette(self, chat_id: Union[int, str]) -> None:  # type: ignore[override]
+        wheel = RouletteWheel()
+        results = [wheel.simulate_bet("red", 1.0) for _ in range(1000)]
+        wins = sum(1 for r in results if r["won"])
+        profit = sum(r["profit"] for r in results)
+        await self._reply(chat_id,
+            f"Roulette (red, 1000 spins): Wins={wins} Profit={profit:+.2f} "
+            f"ROI={profit/1000:+.2%}"
+        )
+
+    async def _cmd_blackjack(self, chat_id: Union[int, str]) -> None:  # type: ignore[override]
+        bj = BlackjackHand()
+        results = [bj.play_round(1.0) for _ in range(1000)]
+        wins = sum(1 for r in results if r["result"] == "win")
+        pushes = sum(1 for r in results if r["result"] == "push")
+        profit = sum(r["profit"] for r in results)
+        await self._reply(chat_id,
+            f"Blackjack (1000 hands): Wins={wins} Pushes={pushes} "
+            f"Profit={profit:+.2f} ROI={profit/1000:+.2%}"
+        )
+
+    async def _cmd_slots(self, chat_id: Union[int, str]) -> None:  # type: ignore[override]
+        slot = SlotMachine(rtp=0.95, volatility="medium")
+        res = slot.simulate(rounds=1000, bet=1.0)
+        await self._reply(chat_id,
+            f"Slots (1000 spins, RTP=95%): "
+            f"Returned={res['total_returned']} Spent={res['total_spent']} "
+            f"ROI={res['actual_rtp']-1:+.2%}"
+        )
+
+    async def _cmd_rngtest(self, chat_id: Union[int, str]) -> None:  # type: ignore[override]
+        rng = PRNG(seed=42)
+        seq = [rng.random() for _ in range(1000)]
+        stats = RNGAnalyzer.analyze(seq)
+        await self._reply(chat_id,
+            "RNG stats (1000 samples):\n" +
+            "\n".join(f"{k}={v}" for k, v in stats.items())
+        )
+
+
+#endregion Advanced Virtual Sports & Casino Prediction Layer
+
+
 if __name__ == "__main__":
-    ghost_main()
+    asyncio.run(main())
