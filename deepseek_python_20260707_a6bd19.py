@@ -10396,6 +10396,7 @@ class DataSource:
 
             await ArbitrageExecutor.find_and_execute([event], state.get("bankroll", 1000), None, None)
 
+            bm_key = "unknown"
             for bm in bookmakers:
                 bm_key = bm.get("key", bm.get("market", "unknown"))
                 markets = bm.get("markets", [])
