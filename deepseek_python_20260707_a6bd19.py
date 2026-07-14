@@ -927,6 +927,10 @@ class DigestSettings(BaseModel):
     daily_digest_minute: int = 0
     daily_digest_window_minutes: int = 15
     daily_digest_timezone: str = "Europe/Berlin"
+    enable_daily_top20_digest_2: bool = True
+    daily_digest_hour_2: int = 17
+    daily_digest_minute_2: int = 0
+    daily_digest_timezone_2: str = "Europe/Berlin"
 
 
 class Settings(BaseSettings):
@@ -1506,9 +1510,6 @@ async def send_email_alert_async(msg: str, level: str = "info") -> None:
         log.error(f"Email send failed: {e}")
 
 async def send_alert_async(msg, level="info"):
-    if CONFIG.dry_run:
-        log.info(f"DRY RUN ALERT [{level}]: {msg}")
-        return
     if CONFIG.telegram_token and CONFIG.telegram_chat_id:
         try:
             if aiohttp:
@@ -14924,7 +14925,12 @@ class Orchestrator:
                 return False
         return False
 
-    async def _run_daily_top20_digest(self, matches: List[Any], force_send: bool = False) -> None:
+    async def _run_daily_top20_digest(self, matches: List[Any], force_send: bool = False,
+                                       target_hour: Optional[int] = None,
+                                       target_minute: Optional[int] = None,
+                                       window_minutes: Optional[int] = None,
+                                       state_key: str = "last_daily_digest_date",
+                                       header_time: str = "07:00") -> None:
         if not CONFIG.enable_daily_top20_digest:
             return
         if not CONFIG.telegram_token or not CONFIG.telegram_chat_id:
@@ -14932,25 +14938,27 @@ class Orchestrator:
 
         tz_info = self._resolve_digest_timezone()
         now_local = datetime.now(tz_info)
+        effective_hour = target_hour if target_hour is not None else int(CONFIG.daily_digest_hour)
+        effective_minute = target_minute if target_minute is not None else int(CONFIG.daily_digest_minute)
+        effective_window = window_minutes if window_minutes is not None else max(0, int(getattr(CONFIG, "daily_digest_window_minutes", 0) or 0))
         if not force_send:
             target_local = now_local.replace(
-                hour=int(CONFIG.daily_digest_hour),
-                minute=int(CONFIG.daily_digest_minute),
+                hour=effective_hour,
+                minute=effective_minute,
                 second=0,
                 microsecond=0,
             )
-            window_minutes = max(0, int(getattr(CONFIG, "daily_digest_window_minutes", 0) or 0))
-            if window_minutes <= 0:
-                if now_local.hour != CONFIG.daily_digest_hour or now_local.minute != CONFIG.daily_digest_minute:
+            if effective_window <= 0:
+                if now_local.hour != effective_hour or now_local.minute != effective_minute:
                     return
             else:
-                window_end = target_local + timedelta(minutes=window_minutes)
+                window_end = target_local + timedelta(minutes=effective_window)
                 if now_local < target_local or now_local > window_end:
                     return
 
         digest_day = now_local.date()
         digest_key = digest_day.isoformat()
-        if self.state.get("last_daily_digest_date") == digest_key:
+        if self.state.get(state_key) == digest_key:
             return
 
         day_matches: List[Dict[str, Any]] = []
@@ -14966,7 +14974,7 @@ class Orchestrator:
                 f"Daily top markets for {digest_key} (CET/CEST): no matches found from current feeds.",
                 level="info",
             )
-            self.state.set("last_daily_digest_date", digest_key)
+            self.state.set(state_key, digest_key)
             await self.state.flush()
             return
 
@@ -15011,12 +15019,12 @@ class Orchestrator:
                 f"Daily top markets for {digest_key} (CET/CEST): no tradable markets available with current bookmaker feed.",
                 level="info",
             )
-            self.state.set("last_daily_digest_date", digest_key)
+            self.state.set(state_key, digest_key)
             await self.state.flush()
             return
 
         header = [
-            f"Daily Top {len(ranked)} Matches - {digest_key} - 07:00 CET/CEST",
+            f"Daily Top {len(ranked)} Matches - {digest_key} - {header_time} CET/CEST",
             "Sorted by strongest market probability (highest to lowest)",
             "",
         ]
@@ -15042,7 +15050,7 @@ class Orchestrator:
             lines.append("")
 
         await self._send_chunked_digest("\n".join(lines), level="info")
-        self.state.set("last_daily_digest_date", digest_key)
+        self.state.set(state_key, digest_key)
         await self.state.flush()
 
     async def run_once(self):
@@ -15065,6 +15073,15 @@ class Orchestrator:
             await self.dept.system_monitor.alert_if_high()
 
             await self._run_daily_top20_digest(matches)
+            if getattr(CONFIG.digest, "enable_daily_top20_digest_2", False):
+                await self._run_daily_top20_digest(
+                    matches,
+                    target_hour=getattr(CONFIG.digest, "daily_digest_hour_2", 17),
+                    target_minute=getattr(CONFIG.digest, "daily_digest_minute_2", 0),
+                    window_minutes=getattr(CONFIG.digest, "daily_digest_window_minutes_2", getattr(CONFIG, "daily_digest_window_minutes", 15)),
+                    state_key="last_daily_digest_date_2",
+                    header_time="17:00",
+                )
 
             if self.pinnacle_fetcher.enabled:
                 try:
@@ -16476,7 +16493,6 @@ async def main():
     CONFIG.dry_run = args.dry_run
     if args.dry_run:
         log.warning("DRY RUN MODE ACTIVE")
-        CONFIG.telegram_token = ""
         os.environ["LHM_DRY_RUN"] = "1"
 
     #     insecure_secret = (not CONFIG.secret_key or CONFIG.secret_key == "change_this_in_production")
