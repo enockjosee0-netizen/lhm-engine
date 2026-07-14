@@ -561,7 +561,8 @@ class RiskSettings(BaseModel):
     max_realistic_edge: float = 0.25
     max_bets_per_day: int = 20
     max_stake_per_match: float = 0.05
-    arb_min_profit_pct: float = 0.5
+    arb_min_profit_pct: float = 3.0
+    arb_alert_min_profit_pct: float = 5.0
     arb_max_stake_pct: float = 0.05
     arb_legs_max: int = 6
     exposure_limit_per_league: float = 0.10
@@ -1463,22 +1464,33 @@ class TraceContext:
 # ALERT MANAGER
 # ======================================================================
 class AlertManager:
-    def __init__(self, max_queue=100):
+    def __init__(self, max_queue=100, max_telegram_per_hour=8):
         self.queue = asyncio.Queue(maxsize=max_queue)
         self.worker_task = None
         self._last_alert = {}
         self._retry_queue = deque()
         self._lock = asyncio.Lock()
+        self._max_telegram_per_hour = max_telegram_per_hour
+        self._telegram_sent_this_hour = 0
+        self._telegram_hour_start = time.time()
 
     async def start(self):
         if self.worker_task is None or self.worker_task.done():
             self.worker_task = asyncio.create_task(self._worker())
 
-    async def send(self, msg: str, dedup_seconds=60, level="info", retry=3):
+    async def send(self, msg: str, dedup_seconds=60, level="info", retry=3, priority=False):
         if self.worker_task is None or self.worker_task.done():
             await self.start()
-        key = hashlib.md5(msg.encode()).hexdigest()
         now = time.time()
+        if now - self._telegram_hour_start >= 3600:
+            self._telegram_hour_start = now
+            self._telegram_sent_this_hour = 0
+        if level in ("warning", "critical") or priority:
+            if self._telegram_sent_this_hour >= self._max_telegram_per_hour:
+                log.info(f"Telegram rate limit reached ({self._max_telegram_per_hour}/hour), dropping alert: {msg[:80]}")
+                return
+            self._telegram_sent_this_hour += 1
+        key = hashlib.md5(msg.encode()).hexdigest()
         async with self._lock:
             if key in self._last_alert and now - self._last_alert[key] < dedup_seconds:
                 return
@@ -1487,14 +1499,14 @@ class AlertManager:
                 if now - self._last_alert[k] > 3600:
                     del self._last_alert[k]
         try:
-            await self.queue.put((msg, level, retry))
+            await self.queue.put((msg, level, retry, bool(priority)))
         except asyncio.QueueFull:
             log.warning("Alert queue full, dropping alert")
 
     async def _worker(self):
         while True:
             try:
-                msg, level, retry = await self.queue.get()
+                msg, level, retry, priority = await self.queue.get()
                 for attempt in range(retry):
                     try:
                         await send_alert_async(msg, level)
@@ -1586,12 +1598,12 @@ async def send_alert_async(msg, level="info"):
             log.error(f"Discord send failed: {e}")
     log.info(f"ALERT [{level}]: {msg}")
 
-def send_alert(msg, level="info"):
+def send_alert(msg, level="info", dedup_seconds=60, retry=3, priority=False):
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(alert_manager.send(msg, level=level))
+        loop.create_task(alert_manager.send(msg, dedup_seconds=dedup_seconds, level=level, retry=retry, priority=priority))
     except RuntimeError:
-        asyncio.run(alert_manager.send(msg, level=level))
+        asyncio.run(alert_manager.send(msg, dedup_seconds=dedup_seconds, level=level, retry=retry, priority=priority))
 
 
 class TelegramCommandCenter:
@@ -7798,7 +7810,21 @@ class ArbitrageExecutor:
                     implied = sum(1.0 / v["price"] for v in items.values() if v["price"] > 0)
                     if implied < 0.995:
                         log.info(f"Arbitrage found: implied {implied:.4f}")
-                        send_alert(f"ARBITRAGE: {implied:.3f} in {market_type}")
+                        home = event.get("home_team") or event.get("homeTeam") or event.get("home", {}).get("name", "Home")
+                        away = event.get("away_team") or event.get("awayTeam") or event.get("away", {}).get("name", "Away")
+                        leg_details = "\n".join(
+                            f"  - {data['name']} @ {data['price']:.2f} on {data['bookmaker']}"
+                            for k, data in items.items()
+                        )
+                        profit_pct = (1.0 - implied) * 100
+                        alert_msg = (
+                            f"ARBITRAGE OPPORTUNITY\n"
+                            f"Match: {home} vs {away}\n"
+                            f"Market: {market_type}\n"
+                            f"Profit: {profit_pct:.2f}%\n"
+                            f"Legs:\n{leg_details}"
+                        )
+                        send_alert(alert_msg, level="warning", dedup_seconds=300, retry=3, priority=True)
                         if CONFIG.enable_health_server:
                             try:
                                 _METRICS["arb_alerts"] += 1
@@ -8157,7 +8183,21 @@ class MultiBookArbScanner:
                     except Exception:
                         pass
                 log.info(f"MULTI-BOOK ARB: {market_type} profit={profit:.2f}% legs={len(legs)}")
-                send_alert(f"ARBITRAGE: {market_type} profit={profit:.2f}% legs={len(legs)}", level="warning")
+                if profit >= getattr(CONFIG, "arb_alert_min_profit_pct", 5.0):
+                    home = event.get("home_team") or event.get("homeTeam") or event.get("home", {}).get("name", "Home")
+                    away = event.get("away_team") or event.get("awayTeam") or event.get("away", {}).get("name", "Away")
+                    leg_details = "\n".join(
+                        f"  - {leg['outcome']} @ {leg['odds']:.2f} on {leg['bookmaker']} | stake={leg['stake']:.2f}"
+                        for leg in legs
+                    )
+                    alert_msg = (
+                        f"ARBITRAGE OPPORTUNITY\n"
+                        f"Match: {home} vs {away}\n"
+                        f"Market: {market_type}\n"
+                        f"Profit: {profit:.2f}%\n"
+                        f"Legs:\n{leg_details}"
+                    )
+                    send_alert(alert_msg, level="warning", dedup_seconds=300, retry=3, priority=True)
                 if CONFIG.enable_health_server:
                     try:
                         _METRICS["arb_alerts"] += 1
