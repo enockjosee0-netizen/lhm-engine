@@ -15309,9 +15309,9 @@ class Orchestrator:
             if not self.fetcher:
                 self.fetcher = await RealDataFetcher(self.schema_validator).__aenter__()
 
-            if await self.fetcher.is_data_frozen():
-                log.warning("Data frozen, skipping betting.")
-                return True
+            data_frozen = await self.fetcher.is_data_frozen()
+            if data_frozen:
+                log.warning("Data frozen, skipping bet placement and arb scan for this cycle.")
 
             matches = await DataSource.fetch_upcoming(self.fetcher, self.state, research_integrator=self.external_integrator)
             log.info(f"Fetched {len(matches)} upcoming matches")
@@ -15339,14 +15339,18 @@ class Orchestrator:
                 except Exception as exc:
                     log.warning(f"Pinnacle sharp line update failed: {exc}")
 
-            odds_data = await self.fetcher.fetch_odds()
-            if odds_data and CONFIG.enable_arbitrage:
-                try:
-                    arbs = await self.arb_scanner.scan(odds_data, float(self.state.get("bankroll", 1000.0) or 1000.0), db=self.db)
-                    if arbs:
-                        log.info(f"Detected {len(arbs)} multi-book arbitrage opportunities")
-                except Exception as exc:
-                    log.warning(f"Multi-book arb scan failed: {exc}")
+            if not data_frozen:
+                odds_data = await self.fetcher.fetch_odds()
+                if odds_data and CONFIG.enable_arbitrage:
+                    try:
+                        arbs = await self.arb_scanner.scan(odds_data, float(self.state.get("bankroll", 1000.0) or 1000.0), db=self.db)
+                        if arbs:
+                            log.info(f"Detected {len(arbs)} multi-book arbitrage opportunities")
+                    except Exception as exc:
+                        log.warning(f"Multi-book arb scan failed: {exc}")
+            else:
+                odds_data = []
+                log.info("Skipping odds fetch and arb scan because data is frozen.")
 
             tasks = []
             match_sem = asyncio.Semaphore(max(1, int(CONFIG.max_concurrent_requests)))
@@ -15364,7 +15368,10 @@ class Orchestrator:
 
             await self._run_betpawa_live_tracking(matches)
 
-            await self._settle_bets()
+            if not data_frozen:
+                await self._settle_bets()
+            else:
+                log.info("Skipping bet settlement because data is frozen.")
             await self._update_state()
             await self._run_daily_reset()
             await self._run_housekeeping()
