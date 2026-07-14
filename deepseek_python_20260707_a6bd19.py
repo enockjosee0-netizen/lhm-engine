@@ -731,6 +731,7 @@ class ExchangeSettings(BaseModel):
     betfair_username: str = ""
     betfair_password: str = ""
     betfair_app_key: str = ""
+    betfair_l2_enabled: bool = False
     exchange_key: str = ""
     exchange_secret: str = ""
     exchange_session_token: str = ""
@@ -1149,6 +1150,7 @@ class Settings(BaseSettings):
         _exchange_fields = {
             'pinnacle_api_key', 'pinnacle_api_base_url', 'pinnacle_odds_market',
             'betfair_username', 'betfair_password', 'betfair_app_key',
+            'betfair_l2_enabled',
             'exchange_key', 'exchange_secret', 'exchange_session_token',
         }
         _notification_fields = {
@@ -1181,6 +1183,17 @@ class Settings(BaseSettings):
             'enable_exogenous_encoder', 'enable_official_feed_gateway', 'enable_order_book_processor',
             'enable_heartbeat_monitor',
         }
+        _upgrades_fields = {
+            'enable_liquidity_routing', 'enable_slippage_predictor', 'enable_bookmaker_router',
+            'enable_atomic_bet_unit', 'enable_covariance_kelly', 'enable_dd_kelly',
+            'enable_tail_hedge', 'enable_pnl_attribution', 'enable_auto_rollback',
+            'enable_shadow_tester', 'enable_drift_telemetry', 'enable_replay_engine',
+            'enable_edge_decay_tracker', 'lhm_upgrades_initialized',
+            'enable_bookmaker_limit_monitoring', 'enable_possession_data',
+            'enable_shot_on_target', 'enable_big_chances', 'enable_goalkeeper_saves',
+            'enable_red_cards', 'enable_penalties', 'enable_substitutions',
+            'enable_manager_changes', 'enable_squad_value',
+        }
         if name in _stealth_fields:
             return getattr(self.stealth, name)
         if name in _risk_fields:
@@ -1197,6 +1210,10 @@ class Settings(BaseSettings):
             return getattr(self.auto, name)
         if name in _ml_fields:
             return getattr(self.ml, name)
+        if name in _upgrades_fields:
+            return getattr(self.upgrades, name)
+        if name.startswith("enable_") or name.endswith("_enabled"):
+            return False
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
     def __setattr__(self, name: str, value):
@@ -1256,6 +1273,7 @@ class Settings(BaseSettings):
         _exchange_fields = {
             'pinnacle_api_key', 'pinnacle_api_base_url', 'pinnacle_odds_market',
             'betfair_username', 'betfair_password', 'betfair_app_key',
+            'betfair_l2_enabled',
             'exchange_key', 'exchange_secret', 'exchange_session_token',
         }
         _notification_fields = {
@@ -1288,6 +1306,17 @@ class Settings(BaseSettings):
             'enable_exogenous_encoder', 'enable_official_feed_gateway', 'enable_order_book_processor',
             'enable_heartbeat_monitor',
         }
+        _upgrades_fields = {
+            'enable_liquidity_routing', 'enable_slippage_predictor', 'enable_bookmaker_router',
+            'enable_atomic_bet_unit', 'enable_covariance_kelly', 'enable_dd_kelly',
+            'enable_tail_hedge', 'enable_pnl_attribution', 'enable_auto_rollback',
+            'enable_shadow_tester', 'enable_drift_telemetry', 'enable_replay_engine',
+            'enable_edge_decay_tracker', 'lhm_upgrades_initialized',
+            'enable_bookmaker_limit_monitoring', 'enable_possession_data',
+            'enable_shot_on_target', 'enable_big_chances', 'enable_goalkeeper_saves',
+            'enable_red_cards', 'enable_penalties', 'enable_substitutions',
+            'enable_manager_changes', 'enable_squad_value',
+        }
         if name in _stealth_fields:
             setattr(self.stealth, name, value)
         elif name in _risk_fields:
@@ -1304,6 +1333,8 @@ class Settings(BaseSettings):
             setattr(self.auto, name, value)
         elif name in _ml_fields:
             setattr(self.ml, name, value)
+        elif name in _upgrades_fields:
+            setattr(self.upgrades, name, value)
         else:
             super().__setattr__(name, value)
 
