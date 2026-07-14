@@ -976,6 +976,8 @@ class Settings(BaseSettings):
     enable_websocket: bool = False
     enable_extra_time_handling: bool = True
     enable_live_odds: bool = False
+    enable_betpawa_live_tracking: bool = True
+    betpawa_live_track_interval_seconds: int = 60
     enable_lineup_scraper: bool = True
     enable_sharp_money_scraper: bool = True
     enable_rl_staking: bool = False
@@ -15084,6 +15086,99 @@ class Orchestrator:
         self.state.set(state_key, digest_key)
         await self.state.flush()
 
+    async def _run_betpawa_live_tracking(self, matches: List[Any]) -> None:
+        if not getattr(CONFIG, "enable_betpawa_live_tracking", False):
+            return
+
+        now_ts = time.time()
+        state_key = "betpawa_live_tracking_ts"
+        last_run = float(self.state.get(state_key, 0.0) or 0.0)
+        interval = max(10, int(getattr(CONFIG, "betpawa_live_track_interval_seconds", 60) or 60))
+        if now_ts - last_run < interval:
+            return
+
+        live_matches: List[Any] = []
+        try:
+            if hasattr(self, "fetcher") and self.fetcher and hasattr(self.fetcher, "_fetch_betpawa_odds"):
+                live_matches = await self.fetcher._fetch_betpawa_odds()
+        except Exception as exc:
+            log.warning(f"BetPawa live tracking fetch failed: {exc}")
+            return
+
+        if not live_matches:
+            return
+
+        prev_live = self.state.get("betpawa_live_matches", {}) or {}
+        if not isinstance(prev_live, dict):
+            prev_live = {}
+        new_live: Dict[str, Any] = {}
+        alert_lines: List[str] = []
+
+        for match in live_matches:
+            row = self._coerce_match_row_dict(match)
+            if not row:
+                continue
+            match_id = row.get("id") or hashlib.md5(f"{row.get('home', '')}{row.get('away', '')}".encode()).hexdigest()[:8]
+            home = row.get("home") or row.get("home_team") or "Home"
+            away = row.get("away") or row.get("away_team") or "Away"
+            competition = row.get("competition") or row.get("league") or "Unknown"
+            kickoff = row.get("local_kickoff") or row.get("match_date") or row.get("commence_time") or "live"
+            status = row.get("status") or row.get("match_status") or "live"
+
+            bm = row.get("bookmakers") or row.get("bookmaker") or []
+            if isinstance(bm, dict):
+                bm = [bm]
+            odds_summary = {}
+            for book in bm[:3]:
+                if not isinstance(book, dict):
+                    continue
+                market = book.get("market") or book.get("market_name") or "h2h"
+                outcomes = book.get("outcomes") or book.get("selections") or {}
+                if isinstance(outcomes, dict):
+                    odds_summary[market] = {k: float(v) for k, v in outcomes.items() if v}
+
+            new_live[match_id] = {
+                "home": home,
+                "away": away,
+                "competition": competition,
+                "kickoff": str(kickoff),
+                "status": str(status),
+                "odds": odds_summary,
+                "updated_ts": now_ts,
+            }
+
+            prev = prev_live.get(match_id)
+            if not prev:
+                alert_lines.append(f"NEW LIVE: {home} vs {away} | {competition} | {kickoff}")
+                if odds_summary:
+                    first_market = next(iter(odds_summary), "h2h")
+                    first_odds = odds_summary[first_market]
+                    odds_str = " | ".join(f"{k}={v:.2f}" for k, v in first_odds.items())
+                    alert_lines.append(f"   Odds: {odds_str}")
+            else:
+                prev_odds = prev.get("odds") or {}
+                for market, cur_odds in odds_summary.items():
+                    prev_market_odds = prev_odds.get(market) or {}
+                    for outcome, cur_price in cur_odds.items():
+                        prev_price = float(prev_market_odds.get(outcome, 0.0) or 0.0)
+                        if prev_price > 0:
+                            move_pct = (cur_price - prev_price) / prev_price
+                            if abs(move_pct) >= 0.05:
+                                direction = "UP" if cur_price > prev_price else "DOWN"
+                                alert_lines.append(f"ODDS MOVE {direction}: {home} vs {away} | {market} {outcome} {prev_price:.2f} -> {cur_price:.2f} ({move_pct:+.1%})")
+
+        for match_id, prev in prev_live.items():
+            if match_id not in new_live:
+                alert_lines.append(f"LIVE ENDED: {prev.get('home')} vs {prev.get('away')} | {prev.get('competition')}")
+
+        self.state.set("betpawa_live_matches", new_live)
+        self.state.set(state_key, now_ts)
+        await self.state.flush()
+
+        if alert_lines:
+            header = f"BetPawa Live Tracker | {len(new_live)} live matches | {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
+            await self._send_chunked_digest("\n".join([header] + alert_lines[:40]), level="info")
+
     async def run_once(self):
         if self._kill_switch:
             log.info("Kill switch activated. Shutting down.")
@@ -15142,6 +15237,8 @@ class Orchestrator:
             for result in batch_results:
                 if isinstance(result, Exception):
                     log.error(f"Match processing failure: {result}", exc_info=True)
+
+            await self._run_betpawa_live_tracking(matches)
 
             await self._settle_bets()
             await self._update_state()
