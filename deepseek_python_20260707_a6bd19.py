@@ -932,6 +932,10 @@ class DigestSettings(BaseModel):
     daily_digest_hour_2: int = 17
     daily_digest_minute_2: int = 0
     daily_digest_timezone_2: str = "Europe/Berlin"
+    enable_prematch_recommendations: bool = True
+    prematch_recommendation_hour: int = 6
+    prematch_late_start_hour: int = 1
+    prematch_late_end_hour: int = 4
 
 
 class Settings(BaseSettings):
@@ -15179,6 +15183,123 @@ class Orchestrator:
             header = f"BetPawa Live Tracker | {len(new_live)} live matches | {datetime.now(timezone.utc).strftime('%H:%M UTC')}"
             await self._send_chunked_digest("\n".join([header] + alert_lines[:40]), level="info")
 
+    async def _send_prematch_recommendations(self, matches: List[Any]) -> None:
+        if not CONFIG.telegram_token or not CONFIG.telegram_chat_id:
+            return
+
+        tz_info = self._resolve_digest_timezone()
+        now_local = datetime.now(tz_info)
+        current_hour = now_local.hour
+
+        late_start = getattr(CONFIG.digest, "prematch_late_start_hour", 1)
+        late_end = getattr(CONFIG.digest, "prematch_late_end_hour", 4)
+        in_late_window = late_start <= current_hour < late_end
+
+        if not in_late_window and not (6 <= current_hour <= 23):
+            return
+
+        state_key = "last_prematch_recommendation_date"
+        digest_day = now_local.date()
+        digest_key = digest_day.isoformat()
+        if not in_late_window and self.state.get(state_key) == digest_key:
+            return
+
+        day_matches: List[Dict[str, Any]] = []
+        for match in matches:
+            row = self._coerce_match_row_dict(match)
+            if not row:
+                continue
+            if self._match_is_for_digest_day(row, digest_day, tz_info):
+                day_matches.append(row)
+
+        if not day_matches:
+            if not in_late_window:
+                await self._send_chunked_digest(
+                    f"Prematch scan for {digest_key}: no matches found from current feeds.",
+                    level="info",
+                )
+                self.state.set(state_key, digest_key)
+                await self.state.flush()
+            return
+
+        recommendations: List[Dict[str, Any]] = []
+        sem = asyncio.Semaphore(max(1, min(int(CONFIG.max_concurrent_requests), 16)))
+
+        async def _predict_for_prematch(row: Dict[str, Any]):
+            async with sem:
+                try:
+                    decisions = await self.dept.predict_all_markets(row)
+                except Exception:
+                    return None
+                if not decisions:
+                    return None
+                valid = []
+                for d in decisions:
+                    try:
+                        prob = float(getattr(d, "prob", 0.0) or 0.0)
+                        edge = float(getattr(d, "edge", 0.0) or 0.0)
+                        confidence = float(getattr(d, "confidence_score", 0.0) or 0.0)
+                        odds = float(getattr(d, "odds", 0.0) or 0.0)
+                        if prob > 0.5 and edge > 0.05 and confidence > 0.35 and odds > 1.2:
+                            valid.append(d)
+                    except Exception:
+                        continue
+                if not valid:
+                    return None
+                best = max(valid, key=lambda item: (
+                    float(getattr(item, "edge", 0.0) or 0.0),
+                    float(getattr(item, "prob", 0.0) or 0.0),
+                    float(getattr(item, "confidence_score", 0.0) or 0.0),
+                ))
+                return (row, best)
+
+        predicted = await asyncio.gather(*[_predict_for_prematch(row) for row in day_matches], return_exceptions=True)
+        for item in predicted:
+            if isinstance(item, tuple) and len(item) == 2:
+                recommendations.append({"match": item[0], "decision": item[1]})
+
+        if not recommendations:
+            if not in_late_window:
+                await self._send_chunked_digest(
+                    f"Prematch scan for {digest_key}: no confident edges found across {len(day_matches)} matches.",
+                    level="info",
+                )
+                self.state.set(state_key, digest_key)
+                await self.state.flush()
+            return
+
+        rec_lines: List[str] = [
+            f"Today's Bet Recommendations | {digest_key} | {len(recommendations)} picks",
+            "Sorted by edge strength (highest first)",
+            "",
+        ]
+        for idx, rec in enumerate(recommendations[:40], start=1):
+            row = rec["match"]
+            dec = rec["decision"]
+            home = row.get("home") or row.get("home_team") or "Home"
+            away = row.get("away") or row.get("away_team") or "Away"
+            competition = row.get("competition") or row.get("league") or "Unknown"
+            kickoff = row.get("local_kickoff") or row.get("match_date") or row.get("commence_time") or "TBD"
+            prob = float(getattr(dec, "prob", 0.0) or 0.0)
+            confidence = float(getattr(dec, "confidence_score", 0.0) or 0.0)
+            edge = float(getattr(dec, "edge", 0.0) or 0.0)
+            odds = float(getattr(dec, "odds", 0.0) or 0.0)
+            stake = float(getattr(dec, "stake", 0.0) or 0.0)
+            market = getattr(dec, "market", "unknown")
+            outcome = getattr(dec, "outcome", "unknown")
+            reason = getattr(dec, "reason", "") or "model edge"
+
+            rec_lines.append(f"{idx}. {home} vs {away} | {competition} | {kickoff}")
+            rec_lines.append(f"   Bet: {market} -> {outcome} | Odds={odds:.2f} | Stake={stake:.2f}")
+            rec_lines.append(f"   p={prob:.3f} | edge={edge:+.3f} | conf={confidence:.3f}")
+            rec_lines.append(f"   Reason: {reason}")
+            rec_lines.append("")
+
+        await self._send_chunked_digest("\n".join(rec_lines), level="info")
+        if not in_late_window:
+            self.state.set(state_key, digest_key)
+            await self.state.flush()
+
     async def run_once(self):
         if self._kill_switch:
             log.info("Kill switch activated. Shutting down.")
@@ -15208,6 +15329,9 @@ class Orchestrator:
                     state_key="last_daily_digest_date_2",
                     header_time="17:00",
                 )
+
+            if getattr(CONFIG.digest, "enable_prematch_recommendations", False):
+                await self._send_prematch_recommendations(matches)
 
             if self.pinnacle_fetcher.enabled:
                 try:
