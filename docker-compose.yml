@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  lhm-engine:
+    build: .
+    container_name: lhm-engine
+    restart: always
+    environment:
+      - LHM_TELEGRAM_TOKEN=${LHM_TELEGRAM_TOKEN}
+      - LHM_TELEGRAM_CHAT_ID=${LHM_TELEGRAM_CHAT_ID}
+      - BETPAWA_PHONE=${BETPAWA_PHONE}
+      - BETPAWA_PASSWORD=${BETPAWA_PASSWORD}
+      - BETIKA_PHONE=${BETIKA_PHONE}
+      - BETIKA_PASSWORD=${BETIKA_PASSWORD}
+      - DRY_RUN=true
+      - USE_FREE_SCRAPERS=true
+      - USE_STEALTH_SCRAPING=true
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./models:/app/models
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G

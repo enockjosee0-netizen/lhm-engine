@@ -1,0 +1,42 @@
+name: LHM Engine Scheduled Run
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  run-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements_enhanced.txt
+          
+      - name: Run LHM Engine
+        env:
+          LHM_TELEGRAM_TOKEN: ${{ secrets.LHM_TELEGRAM_TOKEN }}
+          LHM_TELEGRAM_CHAT_ID: ${{ secrets.LHM_TELEGRAM_CHAT_ID }}
+          DRY_RUN: "true"
+          USE_FREE_SCRAPERS: "true"
+        run: |
+          python deepseek_python_20260707_a6bd19.py --dry-run --health-check
+          
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lhm-logs
+          path: |
+            lhm_prod.log
+            lhm_enhanced.log
+          retention-days: 7

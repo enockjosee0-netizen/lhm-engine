@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run LHM Engine (dry-run)",
+      "type": "shell",
+      "command": "& 'C:\\Users\\enock\\AppData\\Local\\Programs\\Python\\Python312\\python.exe' '${workspaceFolder}\\deepseek_python_20260707_a6bd19.py' --dry-run",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new",
+        "showReuseMessage": false
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run LHM Engine (simulate)",
+      "type": "shell",
+      "command": "& 'C:\\Users\\enock\\AppData\\Local\\Programs\\Python\\Python312\\python.exe' '${workspaceFolder}\\deepseek_python_20260707_a6bd19.py' --dry-run --simulate",
+      "presentation": {
+        "echo": true,
+        "reveal": "always",
+        "focus": true,
+        "panel": "new",
+        "showReuseMessage": false
+      },
+      "problemMatcher": []
+    }
+  ]
+}
