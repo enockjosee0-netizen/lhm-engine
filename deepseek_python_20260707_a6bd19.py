@@ -980,7 +980,7 @@ class Settings(BaseSettings):
     betika_phone: str = ""
     betika_password: str = ""
     use_free_scrapers: bool = True
-    enable_arbitrage: bool = True
+    enable_arbitrage: bool = False
     enable_websocket: bool = False
     enable_extra_time_handling: bool = True
     enable_live_odds: bool = False
