@@ -10482,6 +10482,17 @@ class DataSource:
     @staticmethod
     async def fetch_upcoming(fetcher, state, research_integrator: Optional[Any] = None):
         odds_data = await fetcher.fetch_odds()
+        if not odds_data and CONFIG.use_free_scrapers:
+            try:
+                if hasattr(fetcher, "_fetch_betpawa_odds"):
+                    odds_data = await fetcher._fetch_betpawa_odds() or odds_data
+            except Exception:
+                pass
+            try:
+                if not odds_data and hasattr(fetcher, "_fetch_betika_odds"):
+                    odds_data = await fetcher._fetch_betika_odds() or odds_data
+            except Exception:
+                pass
         if not odds_data:
             return []
 
