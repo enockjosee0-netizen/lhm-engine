@@ -2095,7 +2095,13 @@ class TelegramCommandCenter:
                 "/predict fixture_id|home|away - quick prediction\n"
                 "/selftest - run built-in unit tests\n"
                 "/restart - restart engine\n"
-                "/ping - connectivity check"
+                "/ping - connectivity check\n"
+                "/virtual on|off|help|<home>|<away> - virtual sports predictions\n"
+                "/aviator - Aviator/Crash simulation\n"
+                "/roulette - Roulette simulation\n"
+                "/blackjack - Blackjack simulation\n"
+                "/slots - Slots simulation\n"
+                "/rngtest - RNG statistical quality test"
             )
             return
         if low in {"/ping", "ping"}:
@@ -2141,6 +2147,24 @@ class TelegramCommandCenter:
         if low.startswith("/selftest"):
             await asyncio.to_thread(run_unit_tests)
             await self._reply(chat_id, "Self-test finished. Check logs for full details.")
+            return
+        if low.startswith("/virtual"):
+            await self._cmd_virtual(chat_id, msg)
+            return
+        if low.startswith("/aviator"):
+            await self._cmd_aviator(chat_id)
+            return
+        if low.startswith("/roulette"):
+            await self._cmd_roulette(chat_id)
+            return
+        if low.startswith("/blackjack"):
+            await self._cmd_blackjack(chat_id)
+            return
+        if low.startswith("/slots"):
+            await self._cmd_slots(chat_id)
+            return
+        if low.startswith("/rngtest"):
+            await self._cmd_rngtest(chat_id)
             return
         if low.startswith("/"):
             await self._reply(chat_id, "Unknown command. Send /help")
@@ -22420,10 +22444,12 @@ class VirtualSportsRoundGenerator:
         return "\n".join(lines)
 
 
-# ======================================================================
-# Telegram commands for virtual sports and casino
-# ======================================================================
+#endregion Advanced Virtual Sports & Casino Prediction Layer
 
+
+# ======================================================================
+# Wire virtual-sports / casino Telegram commands into the live bot
+# ======================================================================
 class _VirtualSportsTelegramMixin:
     """Mixin for Telegram virtual-sports and casino commands."""
 
@@ -22443,7 +22469,7 @@ class _VirtualSportsTelegramMixin:
                 "Virtual Sports Commands:\n"
                 "/virtual - demo round (3 football fixtures)\n"
                 "/virtual on|off - toggle\n"
-                "/virtual <sport> <home>|<away> - specific match\n"
+                "/virtual <home>|<away> - specific match\n"
                 "Sports: football, basketball, tennis, horse_racing, "
                 "esports, boxing, cricket, baseball, darts, snooker"
             )
@@ -22509,7 +22535,10 @@ class _VirtualSportsTelegramMixin:
         )
 
 
-#endregion Advanced Virtual Sports & Casino Prediction Layer
+for _attr_name, _attr_val in vars(_VirtualSportsTelegramMixin).items():
+    if not _attr_name.startswith("__") and callable(_attr_val):
+        setattr(TelegramCommandCenter, _attr_name, _attr_val)
+del _VirtualSportsTelegramMixin
 
 
 if __name__ == "__main__":
