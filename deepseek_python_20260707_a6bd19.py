@@ -557,10 +557,13 @@ class RiskSettings(BaseModel):
     live_commission: float = 0.02
     execution_slippage: float = 0.006
     bookmaker_daily_limit: float = 800.0
-    bookmaker_limit_bets: int = 3
-    max_realistic_edge: float = 0.06
-    max_bets_per_day: int = 50
+    bookmaker_limit_bets: int = 50
+    max_realistic_edge: float = 0.25
+    max_bets_per_day: int = 20
     max_stake_per_match: float = 0.05
+    arb_min_profit_pct: float = 0.5
+    arb_max_stake_pct: float = 0.05
+    arb_legs_max: int = 6
     exposure_limit_per_league: float = 0.10
     exposure_limit_per_market: float = 0.05
     exposure_limit_per_team: float = 0.03
