@@ -7813,7 +7813,7 @@ class ArbitrageExecutor:
                         home = event.get("home_team") or event.get("homeTeam") or event.get("home", {}).get("name", "Home")
                         away = event.get("away_team") or event.get("awayTeam") or event.get("away", {}).get("name", "Away")
                         leg_details = "\n".join(
-                            f"  - {data['name']} @ {data['price']:.2f} on {data['bookmaker']}"
+                            f"  - {k.split(':', 1)[-1]} @ {data['price']:.2f} on {data['bookmaker']}"
                             for k, data in items.items()
                         )
                         profit_pct = (1.0 - implied) * 100
