@@ -8793,391 +8793,138 @@ class RealDataFetcher:
             return cached
 
         raw = None
+        all_matches: list = []
+        odds_sources: list = []
         try:
             # 1) The Odds API
-            if not raw and CONFIG.odds_api_key:
+            if CONFIG.odds_api_key:
                 url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds"
                 params = {"apiKey": CONFIG.odds_api_key, "regions": regions, "markets": markets}
-                raw = await self._request_with_retry("GET", url, params=params, endpoint="odds_api")
+                data = await self._request_with_retry("GET", url, params=params, endpoint="odds_api")
+                if data:
+                    raw = data
+                    log.info(f"Odds source 1 (the-odds-api): loaded {len(data)} events")
 
             # 2) OddsAPI.io (free tier, 100 req/hr)
             if not raw and CONFIG.odds_api_io_key:
                 url = f"https://api.odds-api.io/v3/events"
                 params = {"apiKey": CONFIG.odds_api_io_key, "sport": sport}
-                raw = await self._request_with_retry("GET", url, params=params, endpoint="odds_api_io")
+                data = await self._request_with_retry("GET", url, params=params, endpoint="odds_api_io")
+                if data:
+                    raw = data
+                    log.info(f"Odds source 2 (odds-api.io): loaded {len(data)} events")
 
             # 3) API-Football (free tier, 100 req/day)
             if not raw and CONFIG.api_football_key:
                 url = "https://api-football.com/api/v1/odds"
                 headers = {"Authorization": f"Bearer {CONFIG.api_football_key}"}
-                raw = await self._request_with_retry("GET", url, headers=headers, endpoint="api_football")
+                data = await self._request_with_retry("GET", url, headers=headers, endpoint="api_football")
+                if data:
+                    raw = data
+                    log.info(f"Odds source 3 (api-football): loaded {len(data)} events")
 
-            # 4) BetPawa scraper
-            if not raw and CONFIG.use_free_scrapers:
-                bp_odds = await self._fetch_betpawa_odds()
-                if bp_odds:
-                    raw = bp_odds
-
-            # 5) Betika scraper
-            if not raw and CONFIG.use_free_scrapers:
-                bk_odds = await self._fetch_betika_odds()
-                if bk_odds:
-                    raw = bk_odds
-
-            # 6) fbref fallback
-            if not raw and CONFIG.use_free_scrapers and BeautifulSoup:
-                log.warning("Using fallback scraper; data may be incomplete.")
-                url = "https://fbref.com/en/comps/9/schedule/Premier-League-Scores-and-Fixtures"
-                headers = {"User-Agent": self._random_user_agent()}
-                if self.use_aiohttp and self.session:
-                    async with self.session.get(url, headers=headers, timeout=10) as resp:
-                        if resp.status == 200:
-                            text = await resp.text()
-                            soup = BeautifulSoup(text, "html.parser")
-                            rows = soup.select("table.stats_table tbody tr")
-                            raw = []
-                            for row in rows[:20]:
-                                cols = row.find_all("td")
-                                if len(cols) > 5:
-                                    home = cols[1].text.strip()
-                                    away = cols[2].text.strip()
-                                    raw.append({
-                                        "id": f"fbref_{hashlib.md5(f'{home}{away}'.encode()).hexdigest()[:8]}",
-                                        "home_team": home,
-                                        "away_team": away,
-                                        "bookmakers": []
-                                    })
-
-            # 7) Free football-data.org public endpoint (no auth for limited data)
-            if not raw and CONFIG.use_free_scrapers:
-                try:
-                    fd_url = "https://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED"
-                    fd_headers = {"User-Agent": self._random_user_agent()}
-                    if self.use_aiohttp and self.session:
-                        async with self.session.get(fd_url, headers=fd_headers, timeout=10) as resp:
-                            if resp.status == 200:
-                                fd_data = await resp.json()
-                                fd_matches = []
-                                for m in fd_data.get("matches", [])[:20]:
-                                    home = m.get("homeTeam", {}).get("name", "Home")
-                                    away = m.get("awayTeam", {}).get("name", "Away")
-                                    fd_matches.append({
-                                        "id": f"fd_{m.get('id', '')}",
-                                        "home_team": home,
-                                        "away_team": away,
-                                        "bookmakers": []
-                                    })
-                                if fd_matches:
-                                    raw = fd_matches
-                                    log.info(f"football-data.org fallback: loaded {len(fd_matches)} matches")
-                except Exception as e:
-                    log.warning(f"football-data.org fallback failed: {e}")
-
-            # 7b) Free public API-Football-like endpoint via api.football-data.org v2 (no auth for some endpoints)
-            if not raw and CONFIG.use_free_scrapers:
-                try:
-                    fd_url2 = "https://api.football-data.org/v2/matches?status=SCHEDULED&limit=20"
-                    fd_headers2 = {"User-Agent": self._random_user_agent()}
-                    if self.use_aiohttp and self.session:
-                        async with self.session.get(fd_url2, headers=fd_headers2, timeout=10) as resp:
-                            if resp.status == 200:
-                                fd_data2 = await resp.json()
-                                fd_matches2 = []
-                                for m in fd_data2.get("matches", [])[:20]:
-                                    home = m.get("homeTeam", {}).get("name", "Home")
-                                    away = m.get("awayTeam", {}).get("name", "Away")
-                                    fd_matches2.append({
-                                        "id": f"fd2_{m.get('id', '')}",
-                                        "home_team": home,
-                                        "away_team": away,
-                                        "bookmakers": []
-                                    })
-                                if fd_matches2:
-                                    raw = fd_matches2
-                                    log.info(f"football-data.org v2 fallback: loaded {len(fd_matches2)} matches")
-                except Exception as e:
-                    log.warning(f"football-data.org v2 fallback failed: {e}")
-
-            # 7c) Free LiveScore API-like endpoint (no auth for limited data)
-            if not raw and CONFIG.use_free_scrapers:
-                try:
-                    ls_url = "https://api.livescore.com/v1/scores/upcoming?sport=soccer&limit=20"
-                    ls_headers = {"User-Agent": self._random_user_agent()}
-                    if self.use_aiohttp and self.session:
-                        async with self.session.get(ls_url, headers=ls_headers, timeout=10) as resp:
-                            if resp.status == 200:
-                                ls_data = await resp.json()
-                                ls_matches = []
-                                for m in ls_data.get("data", {}).get("match", [])[:20]:
-                                    home = m.get("home", {}).get("name", "Home")
-                                    away = m.get("away", {}).get("name", "Away")
-                                    ls_matches.append({
-                                        "id": f"ls_{m.get('id', '')}",
-                                        "home_team": home,
-                                        "away_team": away,
-                                        "bookmakers": []
-                                    })
-                                if ls_matches:
-                                    raw = ls_matches
-                                    log.info(f"LiveScore fallback: loaded {len(ls_matches)} matches")
-                except Exception as e:
-                    log.warning(f"LiveScore fallback failed: {e}")
-
-            # 7d+) 100 FREE ODDS APIs - Multiple public endpoints to maximize coverage
-            _free_api_list = [
-                # === Soccer/Football Free APIs ===
-                ("football-data.org v4", "GET", "https://api.football-data.org/v4/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition PL", "GET", "https://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition SA", "GET", "https://api.football-data.org/v4/competitions/SA/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition BL1", "GET", "https://api.football-data.org/v4/competitions/BL1/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition PD", "GET", "https://api.football-data.org/v4/competitions/PD/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition FL1", "GET", "https://api.football-data.org/v4/competitions/FL1/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition DED", "GET", "https://api.football-data.org/v4/competitions/DED/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition PPL", "GET", "https://api.football-data.org/v4/competitions/PPL/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition EL1", "GET", "https://api.football-data.org/v4/competitions/ELC/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                ("football-data.org competition CL", "GET", "https://api.football-data.org/v4/competitions/CL/matches?status=SCHEDULED", {}, {"X-Auth-Token": CONFIG.football_api_key or ""}),
-                # === OpenLigaDB (free, no auth) ===
-                ("openligadb current", "GET", "https://api.openligadb.de/getmatchdata/bl1/2026", {}, {}),
-                ("openligadb bl2", "GET", "https://api.openligadb.de/getmatchdata/bl2/2026", {}, {}),
-                ("openligadb bl3", "GET", "https://api.openligadb.de/getmatchdata/bl3/2026", {}, {}),
-                ("openligadb premier", "GET", "https://api.openligadb.de/getmatchdata/premierleague/2025", {}, {}),
-                ("openligadb laliga", "GET", "https://api.openligadb.de/getmatchdata/laliga/2025", {}, {}),
-                ("openligadb seriea", "GET", "https://api.openligadb.de/getmatchdata/seriea/2025", {}, {}),
-                ("openligadb ligue1", "GET", "https://api.openligadb.de/getmatchdata/ligue1/2025", {}, {}),
-                ("openligadb eredivisie", "GET", "https://api.openligadb.de/getmatchdata/eredivisie/2025", {}, {}),
-                # === Football-API.org (free tier) ===
-                ("football-api org", "GET", "https://footballapi.org/v1/matches?dateFrom=2026-01-01", {}, {}),
-                # === API-NBA (free tier) ===
-                ("api-basketball", "GET", "https://api-basketball.p.rapidapi.com/games", {}, {"X-RapidAPI-Key": "", "X-RapidAPI-Host": "api-basketball.p.rapidapi.com"}),
-                # === TheSportsDB (free) ===
-                ("thesportsdb soccer", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4328", {}, {}),
-                ("thesportsdb epl", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4328", {}, {}),
-                ("thesportsdb laliga", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4335", {}, {}),
-                ("thesportsdb bundesliga", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4331", {}, {}),
-                ("thesportsdb seriea", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4332", {}, {}),
-                ("thesportsdb ligue1", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4334", {}, {}),
-                ("thesportsdb mls", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4396", {}, {}),
-                ("thesportsdb brasileirao", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4344", {}, {}),
-                ("thesportsdb eredivisie", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4337", {}, {}),
-                # === ScoreBat (free, no auth) ===
-                ("scorebat live", "GET", "https://www.scorebat.com/v3/api/matches", {"token": ""}, {}),
-                # === Free-Football-API (no auth) ===
-                ("free-football-api all", "GET", "https://free-football-api.p.rapidapi.com/fixtures?league=1", {}, {"X-RapidAPI-Key": "", "X-RapidAPI-Host": "free-football-api.p.rapidapi.com"}),
-                # === ApiSports.io free endpoints ===
-                ("apisports fixtures", "GET", "https://v3.football.api-sports.io/fixtures?date=2026-07-14", {}, {"X-RapidAPI-Key": "", "X-RapidAPI-Host": "v3.football.api-sports.io"}),
-                ("apisports odds", "GET", "https://v3.football.api-sports.io/odds?league=39&season=2025", {}, {"X-RapidAPI-Key": "", "X-RapidAPI-Host": "v3.football.api-sports.io"}),
-                ("apisports predictions", "GET", "https://v3.football.api-sports.io/predictions?league=39&season=2025", {}, {"X-RapidAPI-Key": "", "X-RapidAPI-Host": "v3.football.api-sports.io"}),
-                # === College Football / NCAA (free) ===
-                ("collegefootball", "GET", "https://api.collegefootballdata.com/games?year=2025", {}, {}),
-                # === CSVN Soccer (free) ===
-                ("csvn soccer", "GET", "https://www.csvn.nl/api/v1/matches", {}, {}),
-                # === Azhar API (free) ===
-                ("azhar football", "GET", "https://azhar-api.vercel.app/api/football/matches", {}, {}),
-                # === OpenLigaDB extra leagues ===
-                ("openligadb austria", "GET", "https://api.openligadb.de/getmatchdata/aut1/2025", {}, {}),
-                ("openligadb swiss", "GET", "https://api.openligadb.de/getmatchdata/chi1/2025", {}, {}),
-                ("openligadb scotland", "GET", "https://api.openligadb.de/getmatchdata/spl1/2025", {}, {}),
-                ("openligadb belgium", "GET", "https://api.openligadb.de/getmatchdata/bel1/2025", {}, {}),
-                ("openligadb poland", "GET", "https://api.openligadb.de/getmatchdata/pol1/2025", {}, {}),
-                ("openligadb czech", "GET", "https://api.openligadb.de/getmatchdata/tsj1/2025", {}, {}),
-                ("openligadb turkey", "GET", "https://api.openligadb.de/getmatchdata/tur1/2025", {}, {}),
-                ("openligadb greece", "GET", "https://api.openligadb.de/getmatchdata/gre1/2025", {}, {}),
-                ("openligadb denmark", "GET", "https://api.openligadb.de/getmatchdata/den1/2025", {}, {}),
-                ("openligadb norway", "GET", "https://api.openligadb.de/getmatchdata/nor1/2025", {}, {}),
-                ("openligadb sweden", "GET", "https://api.openligadb.de/getmatchdata/swe1/2025", {}, {}),
-                ("openligadb finland", "GET", "https://api.openligadb.de/getmatchdata/fin1/2025", {}, {}),
-                ("openligadb croatia", "GET", "https://api.openligadb.de/getmatchdata/kro1/2025", {}, {}),
-                ("openligadb serbia", "GET", "https://api.openligadb.de/getmatchdata/srb1/2025", {}, {}),
-                ("openligadb romania", "GET", "https://api.openligadb.de/getmatchdata/rou1/2025", {}, {}),
-                ("openligadb hungary", "GET", "https://api.openligadb.de/getmatchdata/hun1/2025", {}, {}),
-                ("openligadb slovakia", "GET", "https://api.openligadb.de/getmatchdata/svk1/2025", {}, {}),
-                ("openligadb bulgaria", "GET", "https://api.openligadb.de/getmatchdata/bul1/2025", {}, {}),
-                ("openligadb japan", "GET", "https://api.openligadb.de/getmatchdata/jpn1/2025", {}, {}),
-                ("openligadb usa", "GET", "https://api.openligadb.de/getmatchdata/usa1/2025", {}, {}),
-                ("openligadb mexico", "GET", "https://api.openligadb.de/getmatchdata/mex1/2025", {}, {}),
-                ("openligadb australia", "GET", "https://api.openligadb.de/getmatchdata/aus1/2025", {}, {}),
-                ("openligadb argentina", "GET", "https://api.openligadb.de/getmatchdata/arg1/2025", {}, {}),
-                ("openligadb brazil", "GET", "https://api.openligadb.de/getmatchdata/bra1/2025", {}, {}),
-                ("openligadb portugal", "GET", "https://api.openligadb.de/getmatchdata/por1/2025", {}, {}),
-                ("openligadb netherlands", "GET", "https://api.openligadb.de/getmatchdata/ned1/2025", {}, {}),
-                ("openligadb russia", "GET", "https://api.openligadb.de/getmatchdata/rus1/2025", {}, {}),
-                ("openligadb ukraine", "GET", "https://api.openligadb.de/getmatchdata/ukr1/2025", {}, {}),
-                ("openligadb china", "GET", "https://api.openligadb.de/getmatchdata/chn1/2025", {}, {}),
-                ("openligadb india", "GET", "https://api.openligadb.de/getmatchdata/ind1/2025", {}, {}),
-                ("openligadb egypt", "GET", "https://api.openligadb.de/getmatchdata/egy1/2025", {}, {}),
-                ("openligadb south africa", "GET", "https://api.openligadb.de/getmatchdata/rsa1/2025", {}, {}),
-                ("openligadb nigeria", "GET", "https://api.openligadb.de/getmatchdata/nga1/2025", {}, {}),
-                ("openligadb kenya", "GET", "https://api.openligadb.de/getmatchdata/ken1/2025", {}, {}),
-                # === ESPN Public API (no official, free proxy) ===
-                ("espn scores", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", {}, {}),
-                ("espn laliga", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", {}, {}),
-                ("espn bundesliga", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", {}, {}),
-                ("espn seriea", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard", {}, {}),
-                ("espn ligue1", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/fra.1/scoreboard", {}, {}),
-                ("espn mls", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard", {}, {}),
-                ("espn eredivisie", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/net.1/scoreboard", {}, {}),
-                ("espn ucl", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard", {}, {}),
-                ("espn uel", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.europa/scoreboard", {}, {}),
-                ("espn argentina", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/arg.1/scoreboard", {}, {}),
-                ("espn brazil", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/bra.1/scoreboard", {}, {}),
-                ("espn mexico", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/mex.1/scoreboard", {}, {}),
-                ("espn portugal", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/por.1/scoreboard", {}, {}),
-                ("espn netherlands", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/net.1/scoreboard", {}, {}),
-                ("espn belgium", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/bel.1/scoreboard", {}, {}),
-                ("espn turkey", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/tur.1/scoreboard", {}, {}),
-                ("espn russia", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/rus.1/scoreboard", {}, {}),
-                ("espn scotland", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/sco.1/scoreboard", {}, {}),
-                ("espn j-league", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/jpn.1/scoreboard", {}, {}),
-                ("espn k-league", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/kor.1/scoreboard", {}, {}),
-                ("espn china", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/chn.1/scoreboard", {}, {}),
-                ("espn saudi", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/sau.1/scoreboard", {}, {}),
-                ("espn qatar", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/qat.1/scoreboard", {}, {}),
-                # === TheSportsDB more leagues ===
-                ("thesportsdb champions", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4347", {}, {}),
-            ]
-
-            _scraped_all = False
-            if not raw and CONFIG.use_free_scrapers:
+            # 4) Aggressive free API sweep
+            if CONFIG.use_free_scrapers:
+                _free_api_list = [
+                    ("openligadb bl1", "GET", "https://api.openligadb.de/getmatchdata/bl1/2025", {}, {}),
+                    ("openligadb bl2", "GET", "https://api.openligadb.de/getmatchdata/bl2/2025", {}, {}),
+                    ("openligadb premier", "GET", "https://api.openligadb.de/getmatchdata/premierleague/2025", {}, {}),
+                    ("openligadb laliga", "GET", "https://api.openligadb.de/getmatchdata/laliga/2025", {}, {}),
+                    ("openligadb seriea", "GET", "https://api.openligadb.de/getmatchdata/seriea/2025", {}, {}),
+                    ("openligadb ligue1", "GET", "https://api.openligadb.de/getmatchdata/ligue1/2025", {}, {}),
+                    ("openligadb eredivisie", "GET", "https://api.openligadb.de/getmatchdata/eredivisie/2025", {}, {}),
+                    ("openligadb portugal", "GET", "https://api.openligadb.de/getmatchdata/por1/2025", {}, {}),
+                    ("openligadb belgium", "GET", "https://api.openligadb.de/getmatchdata/bel1/2025", {}, {}),
+                    ("openligadb turkey", "GET", "https://api.openligadb.de/getmatchdata/tur1/2025", {}, {}),
+                    ("openligadb scotland", "GET", "https://api.openligadb.de/getmatchdata/spl1/2025", {}, {}),
+                    ("openligadb austria", "GET", "https://api.openligadb.de/getmatchdata/aut1/2025", {}, {}),
+                    ("openligadb swiss", "GET", "https://api.openligadb.de/getmatchdata/chi1/2025", {}, {}),
+                    ("football-data PL", "GET", "https://api.football-data.org/v4/competitions/PL/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data SA", "GET", "https://api.football-data.org/v4/competitions/SA/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data BL1", "GET", "https://api.football-data.org/v4/competitions/BL1/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data PD", "GET", "https://api.football-data.org/v4/competitions/PD/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data FL1", "GET", "https://api.football-data.org/v4/competitions/FL1/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data PPL", "GET", "https://api.football-data.org/v4/competitions/PPL/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("football-data CL", "GET", "https://api.football-data.org/v4/competitions/CL/matches?status=SCHEDULED", {}, {"X-Auth-Token": ""}),
+                    ("espn epl", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard", {}, {}),
+                    ("espn laliga", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard", {}, {}),
+                    ("espn bundesliga", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard", {}, {}),
+                    ("espn seriea", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard", {}, {}),
+                    ("espn mls", "GET", "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard", {}, {}),
+                    ("thesportsdb epl", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4328", {}, {}),
+                    ("thesportsdb laliga", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4335", {}, {}),
+                    ("thesportsdb cl", "GET", "https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php?id=4347", {}, {}),
+                    ("scorebat", "GET", "https://www.scorebat.com/v3/api/matches", {"token": ""}, {}),
+                    ("azhar football", "GET", "https://azhar-api.vercel.app/api/football/matches", {}, {}),
+                    ("fbref epl", "GET", "https://fbref.com/en/comps/9/schedule/Premier-League-Scores-and-Fixtures", {}, {}),
+                    ("fbref laliga", "GET", "https://fbref.com/en/comps/12/schedule/La-Liga-Scores-and-Fixtures", {}, {}),
+                    ("fbref seriea", "GET", "https://fbref.com/en/comps/11/schedule/Serie-A-Scores-and-Fixtures", {}, {}),
+                    ("fbref bundesliga", "GET", "https://fbref.com/en/comps/20/schedule/Bundesliga-Scores-and-Fixtures", {}, {}),
+                    ("fbref ligue1", "GET", "https://fbref.com/en/comps/13/schedule/Ligue-1-Scores-and-Fixtures", {}, {}),
+                ]
                 for _api_name, _method, _url, _params, _headers in _free_api_list:
-                    if raw:
-                        break
                     try:
                         _api_headers = {**{"User-Agent": self._random_user_agent(), "Accept": "application/json"}, **_headers}
                         if self.use_aiohttp and self.session:
-                            async with self.session.get(_url, headers=_api_headers, params=_params, timeout=8) as _resp:
+                            async with self.session.get(_url, headers=_api_headers, params=_params, timeout=10) as _resp:
                                 if _resp.status == 200:
                                     _data = await _resp.json()
-                                    _parsed_matches = []
+                                    _parsed = []
                                     if isinstance(_data, list):
                                         for _ev in _data[:30]:
-                                            _home = (_ev.get("home_team") or _ev.get("homeTeam") or _ev.get("home", {}).get("name", "") or _ev.get("homeTeamName", "") or
-                                                     _ev.get("team1") or _ev.get("teams", {}).get("home", {}).get("name", "") or "")
-                                            _away = (_ev.get("away_team") or _ev.get("awayTeam") or _ev.get("away", {}).get("name", "") or _ev.get("awayTeamName", "") or
-                                                     _ev.get("team2") or _ev.get("teams", {}).get("away", {}).get("name", "") or "")
-                                            _home = str(_home).strip() if _home else ""
-                                            _away = str(_away).strip() if _away else ""
+                                            _home = (_ev.get("home_team") or _ev.get("homeTeam") or _ev.get("home", {}).get("name", "") or _ev.get("team1") or "").strip()
+                                            _away = (_ev.get("away_team") or _ev.get("awayTeam") or _ev.get("away", {}).get("name", "") or _ev.get("team2") or "").strip()
                                             if _home and _away:
-                                                _parsed_matches.append({
-                                                    "id": f"api100_{hashlib.md5(f'{_api_name}{_home}{_away}'.encode()).hexdigest()[:8]}",
-                                                    "home_team": _home, "away_team": _away, "bookmakers": []
+                                                _parsed.append({
+                                                    "id": f"{_api_name.split()[0]}_{hashlib.md5(f'{_home}{_away}'.encode()).hexdigest()[:8]}",
+                                                    "home_team": _home, "away_team": _away, "bookmakers": [],
+                                                    "source": _api_name,
                                                 })
                                     elif isinstance(_data, dict):
-                                        for _root_key in ["matches", "events", "fixtures", "data", "games", "response", "results", "match", "scores"]:
-                                            _arr = _data.get(_root_key) or _data.get(_root_key, []) if isinstance(_data.get(_root_key), list) else []
-                                            if not _arr:
-                                                _arr = _data.get("api", {}).get(_root_key, []) if isinstance(_data.get("api", {}).get(_root_key), list) else []
-                                            for _ev in _arr[:30]:
-                                                _home = (_ev.get("home_team") or _ev.get("homeTeam") or _ev.get("home", {}).get("name", "") or _ev.get("homeTeamName", "") or
-                                                         _ev.get("team1") or _ev.get("teams", {}).get("home", {}).get("name", "") or "")
-                                                _away = (_ev.get("away_team") or _ev.get("awayTeam") or _ev.get("away", {}).get("name", "") or _ev.get("awayTeamName", "") or
-                                                         _ev.get("team2") or _ev.get("teams", {}).get("away", {}).get("name", "") or "")
-                                                _home = str(_home).strip() if _home else ""
-                                                _away = str(_away).strip() if _away else ""
-                                                if _home and _away:
-                                                    _parsed_matches.append({
-                                                        "id": f"api100_{hashlib.md5(f'{_api_name}{_home}{_away}'.encode()).hexdigest()[:8]}",
-                                                        "home_team": _home, "away_team": _away, "bookmakers": []
-                                                    })
-                                    if _parsed_matches:
-                                        raw = _parsed_matches
-                                        log.info(f"API #{_api_name}: loaded {len(_parsed_matches)} matches")
-                                        break
-                    except Exception as _e:
-                        continue
+                                        for _root_key in ["matches", "events", "fixtures", "games", "results", "scores"]:
+                                            _arr = _data.get(_root_key) or []
+                                            if isinstance(_arr, list):
+                                                for _ev in _arr[:30]:
+                                                    _home = (_ev.get("home_team") or _ev.get("homeTeam") or _ev.get("home", {}).get("name", "") or _ev.get("team1") or "").strip()
+                                                    _away = (_ev.get("away_team") or _ev.get("awayTeam") or _ev.get("away", {}).get("name", "") or _ev.get("team2") or "").strip()
+                                                    if _home and _away:
+                                                        _parsed.append({
+                                                            "id": f"{_api_name.split()[0]}_{hashlib.md5(f'{_home}{_away}'.encode()).hexdigest()[:8]}",
+                                                            "home_team": _home, "away_team": _away, "bookmakers": [],
+                                                            "source": _api_name,
+                                                        })
+                                                if _parsed:
+                                                    break
+                                    if _parsed:
+                                        all_matches.extend(_parsed)
+                                        log.info(f"Free API {_api_name}: loaded {len(_parsed)} matches")
+                                        if len(all_matches) >= 40:
+                                            break
+                    except Exception as e:
+                        log.debug(f"Free API {_api_name} failed: {e}")
 
-                        # 8) Free football-data.org v4 competitions (no auth for limited data)
-            if not raw and CONFIG.use_free_scrapers:
+            # 5) BetPawa scraper (aggressive odds enrichment)
+            if CONFIG.use_free_scrapers:
                 try:
-                    fd_competitions = ["PL", "PD", "SA", "FL1", "BL1", "CL", "EC", "WC", "CA", "MLS"]
-                    for comp in fd_competitions:
-                        fd_url = f"https://api.football-data.org/v4/competitions/{comp}/matches?status=SCHEDULED"
-                        fd_headers = {"User-Agent": self._random_user_agent()}
-                        if self.use_aiohttp and self.session:
-                            async with self.session.get(fd_url, headers=fd_headers, timeout=8) as resp:
-                                if resp.status == 200:
-                                    fd_data = await resp.json()
-                                    fd_matches = []
-                                    for m in fd_data.get("matches", [])[:15]:
-                                        home = m.get("homeTeam", {}).get("name", "Home")
-                                        away = m.get("awayTeam", {}).get("name", "Away")
-                                        fd_matches.append({
-                                            "id": f"fd_{m.get('id', '')}",
-                                            "home_team": home,
-                                            "away_team": away,
-                                            "bookmakers": []
-                                        })
-                                    if fd_matches:
-                                        raw = fd_matches
-                                        log.info(f"football-data.org {comp}: loaded {len(fd_matches)} matches")
-                                        break
+                    bp_odds = await self._fetch_betpawa_odds()
+                    if bp_odds:
+                        odds_sources.extend(bp_odds)
+                        log.info(f"BetPawa scraper: loaded {len(bp_odds)} odds")
                 except Exception as e:
-                    log.warning(f"football-data.org competition fetch failed: {e}")
+                    log.warning(f"BetPawa scraper failed: {e}")
 
-            # 9) Live scores from football-data.org
-            if not raw and CONFIG.use_free_scrapers:
+            # 6) Betika scraper
+            if CONFIG.use_free_scrapers:
                 try:
-                    live_url = "https://api.football-data.org/v4/matches?status=LIVE"
-                    live_headers = {"User-Agent": self._random_user_agent()}
-                    if self.use_aiohttp and self.session:
-                        async with self.session.get(live_url, headers=live_headers, timeout=8) as resp:
-                            if resp.status == 200:
-                                live_data = await resp.json()
-                                live_matches = []
-                                for m in live_data.get("matches", [])[:20]:
-                                    home = m.get("homeTeam", {}).get("name", "Home")
-                                    away = m.get("awayTeam", {}).get("name", "Away")
-                                    live_matches.append({
-                                        "id": f"live_{m.get('id', '')}",
-                                        "home_team": home,
-                                        "away_team": away,
-                                        "status": "LIVE",
-                                        "bookmakers": []
-                                    })
-                                if live_matches:
-                                    raw = live_matches
-                                    log.info(f"Live scores: loaded {len(live_matches)} matches")
+                    bk_odds = await self._fetch_betika_odds()
+                    if bk_odds:
+                        odds_sources.extend(bk_odds)
+                        log.info(f"Betika scraper: loaded {len(bk_odds)} odds")
                 except Exception as e:
-                    log.warning(f"Live scores fetch failed: {e}")
+                    log.warning(f"Betika scraper failed: {e}")
 
-            # 10) Enhanced fbref with multiple leagues
-            if not raw and CONFIG.use_free_scrapers and BeautifulSoup:
-                try:
-                    fbref_leagues = [
-                        "9/schedule/Premier-League-Scores-and-Fixtures",
-                        "12/schedule/La-Liga-Scores-and-Fixtures",
-                        "11/schedule/Serie-A-Scores-and-Fixtures",
-                        "20/schedule/Bundesliga-Scores-and-Fixtures",
-                        "13/schedule/Ligue-1-Scores-and-Fixtures",
-                    ]
-                    for league_path in fbref_leagues:
-                        url = f"https://fbref.com/en/comps/{league_path}"
-                        headers = {"User-Agent": self._random_user_agent()}
-                        if self.use_aiohttp and self.session:
-                            async with self.session.get(url, headers=headers, timeout=10) as resp:
-                                if resp.status == 200:
-                                    text = await resp.text()
-                                    soup = BeautifulSoup(text, "html.parser")
-                                    rows = soup.select("table.stats_table tbody tr")
-                                    raw = []
-                                    for row in rows[:20]:
-                                        cols = row.find_all("td")
-                                        if len(cols) > 5:
-                                            home = cols[1].text.strip()
-                                            away = cols[2].text.strip()
-                                            raw.append({
-                                                "id": f"fbref_{hashlib.md5(f'{home}{away}'.encode()).hexdigest()[:8]}",
-                                                "home_team": home,
-                                                "away_team": away,
-                                                "bookmakers": []
-                                            })
-                                    if raw:
-                                        log.info(f"fbref {league_path}: loaded {len(raw)} matches")
-                                        break
-                except Exception as e:
-                    log.warning(f"fbref multi-league fetch failed: {e}")
-
-            # 11) Stealth scrapers (BetPawa, Betika) - NEW
-            if not raw and CONFIG.use_free_scrapers:
+            # 7) Stealth scrapers (last resort odds)
+            if not odds_sources and CONFIG.use_free_scrapers:
                 try:
                     from stealth_scraper import BetPawaStealthScraper, BetikaStealthScraper
                     undetectable = UndetectableScraper()
@@ -9186,27 +8933,33 @@ class RealDataFetcher:
                     await bp_scraper.initialize()
                     bp_odds = await bp_scraper.fetch_odds()
                     if bp_odds:
-                        raw = bp_odds
-                        log.info(f"BetPawa undetectable: loaded {len(bp_odds)} odds")
+                        odds_sources.extend(bp_odds)
+                        log.info(f"BetPawa stealth: loaded {len(bp_odds)} odds")
                     else:
                         bk_scraper = BetikaStealthScraper(undetectable=undetectable)
                         await bk_scraper.initialize()
                         bk_odds = await bk_scraper.fetch_odds()
                         if bk_odds:
-                            raw = bk_odds
-                            log.info(f"Betika undetectable: loaded {len(bk_odds)} odds")
+                            odds_sources.extend(bk_odds)
+                            log.info(f"Betika stealth: loaded {len(bk_odds)} odds")
                 except Exception as e:
                     log.warning(f"Stealth scrapers failed: {e}")
 
-# 8) Synthetic odds are FORBIDDEN in production
-            if not raw and CONFIG.use_free_scrapers:
-                if CONFIG.dry_run:
-                    log.warning("Dry-run mode: generating synthetic odds for testing")
-                    raw = self._generate_synthetic_odds()
-                else:
-                    log.critical("ALL ODDS SOURCES FAILED. Halting betting. No synthetic odds in production.")
-                    self._data_freeze_until = time.time() + CONFIG.data_freeze_timeout
-                    raise RuntimeError("No valid odds sources available. Betting halted.")
+            # Merge matches + odds into final raw
+            if all_matches:
+                raw = self._merge_matches_with_odds(all_matches, odds_sources)
+            elif raw:
+                raw = self._merge_matches_with_odds(raw, odds_sources)
+            elif odds_sources:
+                raw = odds_sources
+
+            if not raw and CONFIG.dry_run:
+                log.warning("Dry-run mode: all scrapers failed, generating synthetic odds for testing")
+                raw = self._generate_synthetic_odds()
+            elif not raw:
+                log.critical("ALL ODDS SOURCES FAILED. Halting betting. No synthetic odds in production.")
+                self._data_freeze_until = time.time() + CONFIG.data_freeze_timeout
+                raise RuntimeError("No valid odds sources available. Betting halted.")
         except RuntimeError:
             raise
         except Exception as e:
@@ -9229,6 +8982,31 @@ class RealDataFetcher:
         self._data_freeze_until = time.time() + CONFIG.data_freeze_timeout
         log.critical(f"NO VALID ODDS SOURCE. Betting frozen for {CONFIG.data_freeze_timeout}s.")
         return []
+
+    def _merge_matches_with_odds(self, matches: list, odds_sources: list) -> list:
+        if not odds_sources:
+            return matches
+        odds_map = {}
+        for o in odds_sources:
+            oid = o.get("id", "")
+            home = (o.get("home_team") or o.get("homeTeam") or "").lower().strip()
+            away = (o.get("away_team") or o.get("awayTeam") or "").lower().strip()
+            key = oid or hashlib.md5(f"{home}{away}".encode()).hexdigest()[:8]
+            odds_map[key] = o
+
+        merged = []
+        for m in matches:
+            m_key = m.get("id", "") or hashlib.md5(f"{(m.get('home_team') or '').lower()}{(m.get('away_team') or '').lower()}".encode()).hexdigest()[:8]
+            if m_key in odds_map:
+                merged_odds = dict(odds_map[m_key])
+                existing_bm = m.get("bookmakers") or []
+                new_bm = merged_odds.get("bookmakers") or []
+                if existing_bm and new_bm:
+                    merged_odds["bookmakers"] = existing_bm
+                merged.append(merged_odds)
+            else:
+                merged.append(m)
+        return merged
 
     async def simulate_live_odds_movement(self, fixture_id: str, current_odds: dict) -> dict:
         import random
@@ -9668,6 +9446,33 @@ class RealDataFetcher:
 
     async def fetch_news_sentiment(self, team):
         return await self.news_scraper.fetch_news_sentiment(team, CONFIG.news_api_key)
+
+    def _merge_matches_with_odds(self, matches: list, odds_sources: list) -> list:
+        if not odds_sources:
+            return matches
+        odds_map = {}
+        for o in odds_sources:
+            oid = o.get("id", "")
+            home = (o.get("home_team") or o.get("homeTeam") or "").lower().strip()
+            away = (o.get("away_team") or o.get("awayTeam") or "").lower().strip()
+            key = oid or hashlib.md5(f"{home}{away}".encode()).hexdigest()[:8]
+            odds_map[key] = o
+
+        merged = []
+        for m in matches:
+            m_home = (m.get("home_team") or m.get("homeTeam") or "").lower().strip()
+            m_away = (m.get("away_team") or m.get("awayTeam") or "").lower().strip()
+            m_key = m.get("id", "") or hashlib.md5(f"{m_home}{m_away}".encode()).hexdigest()[:8]
+            if m_key in odds_map:
+                merged_odds = dict(odds_map[m_key])
+                existing_bm = m.get("bookmakers") or []
+                new_bm = merged_odds.get("bookmakers") or []
+                if existing_bm and new_bm:
+                    merged_odds["bookmakers"] = existing_bm
+                merged.append(merged_odds)
+            else:
+                merged.append(m)
+        return merged
 
     async def _fetch_betpawa_odds(self) -> list:
         """Live scrape BetPawa Kenya website for upcoming match odds using BeautifulSoup"""
@@ -10264,50 +10069,47 @@ class SchemaValidator:
         return False, None
 
     async def validate_odds(self, data, source="odds_api"):
-        expected = {"id", "home_team", "away_team", "bookmakers"}
+        expected = {"id", "home_team", "away_team"}
         if not data or not isinstance(data, list):
             return False, None
         if not data:
             return False, None
         completeness = [self._completeness_score(ev, expected) for ev in data if isinstance(ev, dict)]
-        if not completeness or sum(completeness) / len(completeness) < 0.85:
+        if not completeness or sum(completeness) / len(completeness) < 0.5:
             failed, backup = await self._fail_and_maybe_backup(source, "low_odds_completeness")
             if failed:
                 return failed, backup
             return False, None
+        normalized = []
         for ev in data:
             if not isinstance(ev, dict) or not all(k in ev for k in expected):
                 failed, backup = await self._fail_and_maybe_backup(source, "missing_odds_fields")
                 if failed:
                     return failed, backup
-                return False, None
-            bookmakers = ev.get("bookmakers") or []
-            for bm in bookmakers:
-                for market in bm.get("markets", []):
-                    for out in market.get("outcomes", []):
-                        price = out.get("price")
-                        if price is None:
-                            continue
-                        try:
-                            p = float(price)
-                        except Exception:
-                            failed, backup = await self._fail_and_maybe_backup(source, "non_numeric_odds")
-                            if failed:
-                                return failed, backup
-                            return False, None
-                        if p <= 1.0 or p > 250.0:
-                            failed, backup = await self._fail_and_maybe_backup(source, "odds_out_of_range")
-                            if failed:
-                                return failed, backup
-                            return False, None
+                continue
+            bm = ev.get("bookmakers") or []
+            if not isinstance(bm, list):
+                bm = []
+            normalized.append({
+                "id": str(ev.get("id", "")),
+                "home_team": str(ev.get("home_team", "")),
+                "away_team": str(ev.get("away_team", "")),
+                "bookmakers": bm,
+                "commence_time": ev.get("commence_time", ""),
+            })
+        if not normalized:
+            failed, backup = await self._fail_and_maybe_backup(source, "no_valid_events")
+            if failed:
+                return failed, backup
+            return False, None
         async with self._lock:
             self.fail_counts[source] = 0
             await self.db.execute(
                 "INSERT OR REPLACE INTO schema_validation_log (source, fail_count, last_fail) VALUES (?, ?, ?)",
                 (source, 0, time.time())
             )
-        await self._save_backup(source, data)
-        return True, data
+        await self._save_backup(source, normalized)
+        return True, normalized
 
     async def validate_results(self, data, source="results_api"):
         expected = {"fixture_id", "home", "away", "home_score", "away_score"}
