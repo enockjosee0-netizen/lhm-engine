@@ -680,7 +680,7 @@ class DataSettings(BaseModel):
     tls_keyfile: str = "certs/lhm_key.pem"
     tls_common_name: str = "localhost"
     max_concurrent_requests: int = 10
-    data_freeze_timeout: int = 300
+    data_freeze_timeout: int = 60
     jitter_concurrent: bool = True
     batch_checkpoint_recovery: bool = True
     migration_retry_attempts: int = 3
@@ -9227,7 +9227,7 @@ class RealDataFetcher:
             return data
 
         self._data_freeze_until = time.time() + CONFIG.data_freeze_timeout
-        log.critical("NO VALID ODDS SOURCE. Betting frozen for 5 min.")
+        log.critical(f"NO VALID ODDS SOURCE. Betting frozen for {CONFIG.data_freeze_timeout}s.")
         return []
 
     async def simulate_live_odds_movement(self, fixture_id: str, current_odds: dict) -> dict:
@@ -9411,7 +9411,7 @@ class RealDataFetcher:
             self._data_freeze_until = 0
             return data
         self._data_freeze_until = time.time() + CONFIG.data_freeze_timeout
-        log.warning("No valid results. Betting frozen for 5 min.")
+        log.warning(f"No valid results. Betting frozen for {CONFIG.data_freeze_timeout}s.")
         return []
 
     async def is_data_frozen(self):
@@ -16733,6 +16733,22 @@ async def main():
     parser.add_argument('--api-port', type=int, default=8080, help='Port for API server')
     args = parser.parse_args()
 
+    _LOCK_PATH = Path(os.path.abspath(__file__)).with_name("lhm.lock")
+    try:
+        if _LOCK_PATH.exists():
+            old_pid = int(_LOCK_PATH.read_text(encoding="utf-8").strip() or 0)
+            if old_pid and sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, old_pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    print(f"Another LHM instance is already running (PID {old_pid}). Exiting.")
+                    raise SystemExit(0)
+        _LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
     if args.run_once:
         from lhm_modular.run import main as modular_main
         return_code = modular_main(["--run-once"])
@@ -17046,6 +17062,10 @@ async def main():
                 await _safe_cleanup_step("dept executor shutdown", lambda: orchestrator.dept.executor.shutdown(wait=True), logger=log)
             if hasattr(orchestrator, 'dept') and getattr(orchestrator.dept, 'engine', None):
                 await _safe_cleanup_step("dept engine shutdown", orchestrator.dept.engine.shutdown, logger=log)
+            try:
+                _LOCK_PATH.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         loop = asyncio.get_event_loop()
         if loop.is_running():
