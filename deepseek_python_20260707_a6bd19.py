@@ -21378,7 +21378,8 @@ class VirtualSportsSwitch:
         global VIRTUAL_SPORTS_ACTIVE
         VIRTUAL_SPORTS_ACTIVE = False
         VIRTUAL_SPORTS_CONFIG.enabled = False
-        log.info("VirtualSportsSwitch: disabled")
+        VIRTUAL_SPORTS_CACHE.clear()
+        log.info("VirtualSportsSwitch: disabled, cache cleared")
 
     @classmethod
     def is_active(cls) -> bool:
